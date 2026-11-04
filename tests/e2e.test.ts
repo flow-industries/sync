@@ -64,12 +64,13 @@ function obsidian(note: FakeFlowId, name: string) {
     fetch: note.fetch,
     local,
     configDir: ".obsidian",
-    indexFor: (did, vault) => {
-      const key = `${did}:${vault}`;
-      const index = indexes.get(key) ?? new MemoryIndex();
-      indexes.set(key, index);
+    indexFor: (key) => {
+      const name = JSON.stringify(key);
+      const index = indexes.get(name) ?? new MemoryIndex();
+      indexes.set(name, index);
       return index;
     },
+    forgetIndexes: async () => indexes.clear(),
     hold: async () => () => {},
     forgetDevice: deleteDeviceStorage,
     confirmDeletions: async () => true,

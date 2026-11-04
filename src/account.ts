@@ -45,29 +45,75 @@ function claimedHandle(document: unknown, did: string): string | null {
   return handle && HANDLE.test(handle) ? handle : null;
 }
 
+/** A DNS TXT lookup, where the platform offers one (desktop): each record as its chunks. */
+export type ResolveTxt = (name: string) => Promise<string[][]>;
+
+async function answersOverHttps(
+  handle: string,
+  did: string,
+  fetch: NoteDeviceFetch,
+): Promise<boolean> {
+  try {
+    const response = await fetch(`https://${handle}/.well-known/atproto-did`, {
+      method: "GET",
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+    return response.ok && (await response.text()).trim() === did;
+  } catch {
+    return false;
+  }
+}
+
+/** The DNS method: exactly one `did=` record at `_atproto.<handle>`, naming `did`. */
+async function answersOverDns(
+  handle: string,
+  did: string,
+  resolveTxt: ResolveTxt,
+): Promise<boolean> {
+  try {
+    const claims = (await resolveTxt(`_atproto.${handle}`))
+      .map((chunks) => chunks.join(""))
+      .filter((record) => record.startsWith("did="));
+    return claims.length === 1 && claims[0] === `did=${did}`;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Names the account behind `did` by its handle, checked both ways: the DID
- * document claims the handle, and the handle's domain answers with the DID.
- * A DID document alone could claim anyone's handle. Anything unverifiable
- * leaves just the DID, which is what the link actually bound.
+ * document claims the handle, and the handle's domain answers with the DID,
+ * over HTTPS or, where the platform can look it up, DNS. A DID document
+ * alone could claim anyone's handle. Anything unverifiable leaves just the
+ * DID, which is what the link actually bound.
  */
 export async function linkedAccount(
   did: string,
   fetch: NoteDeviceFetch,
+  resolveTxt?: ResolveTxt,
 ): Promise<LinkedAccount> {
   try {
     const url = documentUrl(did);
     if (!url) return { did };
     const handle = claimedHandle(await getJson(fetch, url), did);
     if (!handle) return { did };
-    const response = await fetch(`https://${handle}/.well-known/atproto-did`, {
-      method: "GET",
-      signal: AbortSignal.timeout(TIMEOUT_MS),
-    });
-    if (response.ok && (await response.text()).trim() === did)
+    if (
+      (await answersOverHttps(handle, did, fetch)) ||
+      (resolveTxt && (await answersOverDns(handle, did, resolveTxt)))
+    )
       return { did, handle };
   } catch {
     // An account that can't be named still shows its DID.
   }
   return { did };
+}
+
+/**
+ * The domain that vouched for a handle: everything after its first label,
+ * or the whole handle when that leaves a bare top-level domain. A lookalike
+ * such as `alice-flow.talk.example` reads as `talk.example` here.
+ */
+export function handleDomain(handle: string): string {
+  const rest = handle.slice(handle.indexOf(".") + 1);
+  return rest.includes(".") ? rest : handle;
 }

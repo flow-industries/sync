@@ -1,4 +1,4 @@
-import { type LinkedAccount, linkedAccount } from "./account";
+import { type LinkedAccount, linkedAccount, type ResolveTxt } from "./account";
 import type { Custody } from "./custody";
 import type {
   DeviceOptions,
@@ -15,21 +15,23 @@ import {
   SyncEngine,
   type SyncIndex,
 } from "./engine";
+import type { IndexKey } from "./index-store";
+import { Traffic } from "./traffic";
 
 /** The device client calls the controller makes. */
 export interface DeviceClient {
-  createDeviceSeed(): Uint8Array;
-  linkDevice(seed: Uint8Array, options: LinkOptions): Promise<unknown>;
-  openDeviceVault(
+  createDeviceSeed: () => Uint8Array;
+  linkDevice: (seed: Uint8Array, options: LinkOptions) => Promise<unknown>;
+  openDeviceVault: (
     seed: Uint8Array,
     options: DeviceOptions,
-  ): Promise<DeviceVault>;
+  ) => Promise<DeviceVault>;
   /** The status the device's sync reports once it lost access and wiped its keys. */
   locked: string;
   /** Whether a status means the device's last sync read the vault, so its local copy is current. */
-  pulled(status: string): boolean;
+  pulled: (status: string) => boolean;
   /** Whether a write was refused because the item changed since it was read (`NoteChangedError`). */
-  stale(error: unknown): boolean;
+  stale: (error: unknown) => boolean;
 }
 
 export type Phase =
@@ -53,6 +55,8 @@ export const STRANDED =
   "NOTE's key changed while edits from this vault were still waiting to sync. Nothing is overwritten this time: where NOTE has different text, this vault's is kept as a conflict copy beside it.";
 export const LOCKED_ELSEWHERE =
   "This vault is already syncing in another Obsidian window.";
+export const ALREADY_LINKED =
+  "This vault is still linked. Unlink it before linking it again.";
 
 export interface ControllerOptions {
   custody: Custody;
@@ -60,28 +64,34 @@ export interface ControllerOptions {
   /** Flow ID's origin. */
   host: string;
   fetch: NoteDeviceFetch;
+  /** DNS TXT lookups, for handles verified that way; absent where the platform has none. */
+  resolveTxt?: ResolveTxt;
   local: LocalVault;
   configDir: string;
-  /** The index for one NOTE vault, so relinking to another vault never reuses it. */
-  indexFor(did: string, vault: string): SyncIndex;
+  /** The index of one linked device: a new link never plans against another device's base. */
+  indexFor: (key: IndexKey) => SyncIndex;
+  /** Deletes every index this Obsidian vault holds, for every device it was linked as. */
+  forgetIndexes: () => Promise<void>;
   /**
    * Holds this vault's credential store for as long as the vault is open,
-   * across every window of this app, or answers null when another holder has
-   * it, so only one device transport ever refreshes its tokens.
+   * across every window of this app, or answers null when another holder
+   * keeps it, so only one device transport ever refreshes its tokens.
    */
-  hold(): Promise<(() => void) | null>;
+  hold: () => Promise<(() => void) | null>;
   /** Deletes the device client's local databases for this seed, unsynced edits included. */
-  forgetDevice(seed: Uint8Array): Promise<void>;
-  confirmDeletions(deletions: Deletions): Promise<boolean>;
-  onChange(): void;
-  onTrustLoss(loss: TrustLoss): void;
+  forgetDevice: (seed: Uint8Array) => Promise<void>;
+  confirmDeletions: (deletions: Deletions) => Promise<boolean>;
+  onChange: () => void;
+  onTrustLoss: (loss: TrustLoss) => void;
   /** Tells the person something sync did that they didn't ask for. */
-  notify(message: string): void;
+  notify: (message: string) => void;
 }
 
 const LOCAL_DEBOUNCE_MS = 1_500;
 const REMOTE_DEBOUNCE_MS = 500;
 const RETRY_MS = 30_000;
+/** How long a closed device's lock waits for a token refresh it already sent. */
+const DRAIN_MS = 15_000;
 
 /**
  * Links, opens and syncs one Obsidian vault with its NOTE vault, and owns the
@@ -103,8 +113,17 @@ export class SyncController {
   private generation = 0;
   private ready = false;
   private linking = false;
+  private traffic = new Traffic();
+  /** Settles once the last closed device's lock is released. */
+  private released: Promise<void> = Promise.resolve();
+  /** The last stop or removal told to the person, so a retry that fails the same way stays quiet. */
+  private told: string | null = null;
 
   constructor(private readonly options: ControllerOptions) {}
+
+  private nameAccount(did: string) {
+    return linkedAccount(did, this.options.fetch, this.options.resolveTxt);
+  }
 
   /** The account the person confirmed, while linked. */
   account(): LinkedAccount | null {
@@ -113,6 +132,17 @@ export class SyncController {
 
   private set(phase: Phase) {
     this.phase = phase;
+    // Mobile has no status bar: a stop is only seen if it's said.
+    const notice =
+      phase.kind === "removed"
+        ? phase.message
+        : phase.kind === "stopped"
+          ? `Syncing stopped. ${phase.message}`
+          : null;
+    if (notice && notice !== this.told) this.options.notify(notice);
+    if (notice) this.told = notice;
+    else if (phase.kind === "open" || phase.kind === "unlinked")
+      this.told = null;
     this.options.onChange();
   }
 
@@ -131,10 +161,7 @@ export class SyncController {
       if (!custody.seed() || !credentials)
         return this.set({ kind: "unlinked" });
       if (custody.account()?.did !== credentials.did) {
-        const account = await linkedAccount(
-          credentials.did,
-          this.options.fetch,
-        );
+        const account = await this.nameAccount(credentials.did);
         if (this.live(generation)) this.set({ kind: "confirm", account });
         return;
       }
@@ -152,16 +179,17 @@ export class SyncController {
    * to. Nothing syncs until `confirm`.
    */
   async link(label: string, signal: AbortSignal): Promise<LinkedAccount> {
-    if (this.linking || this.vault)
-      throw new Error("This vault is already linked.");
     const { custody, device } = this.options;
-    this.close();
+    if (this.linking || this.vault || custody.linked())
+      throw new Error(ALREADY_LINKED);
     this.linking = true;
-    custody.wipe();
-    const seed = device.createDeviceSeed();
-    custody.saveSeed(seed);
+    let seed: Uint8Array | undefined;
     this.set({ kind: "linking" });
     try {
+      // Whatever an earlier link left (an interrupted link, or tokens the secret store lost) goes before a new one starts.
+      await this.forget();
+      seed = device.createDeviceSeed();
+      custody.saveSeed(seed);
       await device.linkDevice(seed, {
         ...this.deviceOptions(),
         label,
@@ -170,7 +198,7 @@ export class SyncController {
       });
       const credentials = await custody.credentials.read();
       if (!credentials) throw new Error("Linking stored no credentials.");
-      const account = await linkedAccount(credentials.did, this.options.fetch);
+      const account = await this.nameAccount(credentials.did);
       this.set({ kind: "confirm", account });
       return account;
     } catch (error) {
@@ -179,7 +207,7 @@ export class SyncController {
       throw error;
     } finally {
       this.linking = false;
-      seed.fill(0);
+      seed?.fill(0);
     }
   }
 
@@ -217,7 +245,11 @@ export class SyncController {
     this.schedule(LOCAL_DEBOUNCE_MS);
   }
 
-  /** Closes the vault and stops any round or open in flight; unsynced writes wait in the local database. */
+  /**
+   * Closes the vault and stops any round or open in flight; unsynced writes
+   * wait in the local database. The lock is released once the device's
+   * requests settle, so a token refresh it already sent lands first.
+   */
   close() {
     this.generation++;
     this.ready = false;
@@ -227,8 +259,15 @@ export class SyncController {
     this.vault?.stop();
     this.vault = null;
     this.engine = null;
-    this.release?.();
+    const release = this.release;
     this.release = null;
+    if (release) {
+      const earlier = this.released;
+      this.released = this.traffic
+        .idle(DRAIN_MS)
+        .then(() => earlier)
+        .then(release);
+    }
   }
 
   /**
@@ -237,29 +276,31 @@ export class SyncController {
    * the files here still hold them.
    */
   private async forget() {
-    const { custody, indexFor, forgetDevice } = this.options;
-    const credentials = await custody.credentials.read();
-    const checkpoint = await custody.checkpoints.read();
+    const { custody, forgetIndexes, forgetDevice } = this.options;
     const seed = custody.seed();
     this.close();
     custody.wipe();
     try {
-      if (credentials && checkpoint)
-        await indexFor(credentials.did, checkpoint.vault)
-          .clear()
-          .catch(() => {});
+      await forgetIndexes().catch(() => {});
       if (seed) await forgetDevice(seed).catch(() => {});
     } finally {
       seed?.fill(0);
     }
   }
 
+  /** Options for one device transport, whose requests and token writes count toward its traffic. */
   private deviceOptions(): DeviceOptions {
     const { custody, host, fetch } = this.options;
+    const traffic = this.traffic;
+    const { credentials, checkpoints } = custody.scope();
     return {
       host,
-      fetch,
-      ...custody.scope(),
+      fetch: (url, init) => traffic.track(() => fetch(url, init)),
+      credentials: {
+        read: credentials.read,
+        write: (value) => traffic.track(() => credentials.write(value)),
+      },
+      checkpoints,
       onRemoved: async (reason) => {
         await this.forget();
         this.set({ kind: "removed", message: REMOVED[reason] });
@@ -286,18 +327,25 @@ export class SyncController {
       if (!seed || !credentials) return this.set({ kind: "unlinked" });
       if (custody.account()?.did !== credentials.did) return void this.start();
       this.set({ kind: "opening" });
+      await this.released;
+      if (!this.live(generation)) return;
       const release = await this.options.hold();
       if (!this.live(generation)) return release?.();
       if (!release)
         return this.set({ kind: "stopped", message: LOCKED_ELSEWHERE });
       this.release = release;
+      this.traffic = new Traffic();
       vault = await device.openDeviceVault(seed, this.deviceOptions());
       const checkpoint = await custody.checkpoints.read();
       if (!checkpoint) throw new Error("This vault's pin is missing.");
       const engine = new SyncEngine({
         local: this.options.local,
         remote: vault,
-        index: this.options.indexFor(credentials.did, checkpoint.vault),
+        index: this.options.indexFor({
+          did: credentials.did,
+          vault: checkpoint.vault,
+          deviceId: credentials.deviceId,
+        }),
         configDir: this.options.configDir,
         confirmDeletions: this.options.confirmDeletions,
         stale: device.stale,

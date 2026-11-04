@@ -12,13 +12,14 @@ import {
   type TrustLoss,
 } from "./device";
 import { requestUrlFetch } from "./fetch";
-import { IndexedDbIndex } from "./index-store";
+import { deleteIndexes, IndexedDbIndex, indexName } from "./index-store";
 import { holdLock } from "./lock";
 import { confirm, LinkModal } from "./obsidian/modals";
 import { NoteSyncSettingTab, statusText } from "./obsidian/settings";
 import {
   custodyNote,
   defaultLabel,
+  desktopResolveTxt,
   deviceNamespace,
   obsidianSecrets,
   obsidianVault,
@@ -26,6 +27,8 @@ import {
 
 /** Flow ID, which links devices and relays the encrypted vault to the person's PDS. */
 const FLOW_ID = "https://id.flow.industries";
+/** How long opening waits for another holder of this vault's link before saying it's syncing elsewhere. */
+const LOCK_WAIT_MS = 20_000;
 
 export default class NoteSyncPlugin extends Plugin {
   controller!: SyncController;
@@ -48,11 +51,12 @@ export default class NoteSyncPlugin extends Plugin {
       },
       host: FLOW_ID,
       fetch: requestUrlFetch(requestUrl),
+      resolveTxt: desktopResolveTxt(),
       local: obsidianVault(this.app),
       configDir: this.app.vault.configDir,
-      indexFor: (did, vault) =>
-        new IndexedDbIndex(`flow-note-sync:${namespace}:${did}:${vault}`),
-      hold: () => holdLock(`flow-note:${namespace}`),
+      indexFor: (key) => new IndexedDbIndex(indexName(namespace, key)),
+      forgetIndexes: () => deleteIndexes(namespace),
+      hold: () => holdLock(`flow-note:${namespace}`, LOCK_WAIT_MS),
       forgetDevice: deleteDeviceStorage,
       confirmDeletions: ({ local, remote }) =>
         confirm(

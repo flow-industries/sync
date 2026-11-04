@@ -63,7 +63,9 @@ export class NoteSyncSettingTab extends PluginSettingTab {
       new Setting(containerEl).setName("Account").setDesc(accountName(account));
 
     const linked = phase.kind === "open" || phase.kind === "opening";
-    if (!linked)
+    // A stopped vault is still linked: linking again would orphan its device, so it offers Retry and Unlink instead.
+    const linkable = !linked && phase.kind !== "stopped";
+    if (linkable)
       new Setting(containerEl)
         .setName(
           phase.kind === "confirm"
@@ -71,7 +73,7 @@ export class NoteSyncSettingTab extends PluginSettingTab {
             : "Link this vault",
         )
         .setDesc(
-          "Approve this vault once in your browser at note.flow.talk. Nothing syncs until you confirm which account it linked to.",
+          "Approve this vault once in your browser, on NOTE's link page. Nothing syncs until you confirm which account it linked to.",
         )
         .addButton((button) =>
           button
@@ -100,7 +102,12 @@ export class NoteSyncSettingTab extends PluginSettingTab {
         );
       this.roundDetails(containerEl, controller.lastRound);
     }
-    if (account || phase.kind === "confirm" || linked)
+    if (
+      account ||
+      linked ||
+      phase.kind === "confirm" ||
+      phase.kind === "stopped"
+    )
       new Setting(containerEl)
         .setName("Unlink")
         .setDesc(
@@ -139,7 +146,7 @@ export class NoteSyncSettingTab extends PluginSettingTab {
         .slice(0, 5)
         .map(({ path, error }) => `${path || "Sync"}: ${error}`),
       round.unsyncable.length
-        ? `Not synced (a name one side can't store, a name that differs only in case, or an attachment over 32 MB): ${round.unsyncable.slice(0, 5).join(", ")}${round.unsyncable.length > 5 ? "…" : ""}`
+        ? `Not synced (a script another plugin could run, a name one side can't store, a name that differs only in case, or an attachment over 32 MB): ${round.unsyncable.slice(0, 5).join(", ")}${round.unsyncable.length > 5 ? "…" : ""}`
         : "",
       round.held.local || round.held.remote
         ? `Held back: ${round.held.local} deletions here and ${round.held.remote} in NOTE. Sync now to review them.`

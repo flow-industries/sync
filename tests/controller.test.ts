@@ -3,11 +3,12 @@ import type { SyncListener } from "@flow-industries/seal";
 import {
   type ControllerOptions,
   LOCKED_ELSEWHERE,
+  REMOVED,
   STRANDED,
   SyncController,
 } from "../src/controller";
 import { Custody, type SecretBackend } from "../src/custody";
-import type { DeviceVault } from "../src/device";
+import type { DeviceOptions, DeviceVault } from "../src/device";
 import { sha256 } from "../src/hash";
 import { isStale, MemoryIndex, MemoryRemote, MemoryVault } from "./fakes";
 
@@ -79,6 +80,9 @@ async function harness(
     stranded?: boolean;
     held?: boolean;
     confirmed?: boolean;
+    fetch?: ControllerOptions["fetch"];
+    hold?: ControllerOptions["hold"];
+    onOpen?: (options: DeviceOptions) => void;
   } = {},
 ) {
   const secrets = new Secrets();
@@ -98,8 +102,9 @@ async function harness(
     device: {
       createDeviceSeed: () => new Uint8Array(32).fill(2),
       linkDevice: () => new Promise(() => {}),
-      openDeviceVault: async () => {
+      openDeviceVault: async (_seed, deviceOptions) => {
         await options.opened;
+        options.onOpen?.(deviceOptions);
         return device.vault;
       },
       locked: "Locked",
@@ -107,11 +112,12 @@ async function harness(
       stale: isStale,
     },
     host: "https://id.example",
-    fetch: async () => new Response(null, { status: 404 }),
+    fetch: options.fetch ?? (async () => new Response(null, { status: 404 })),
     local,
     configDir: ".obsidian",
     indexFor: () => index,
-    hold: async () => (options.held ? null : () => {}),
+    forgetIndexes: async () => index.clear(),
+    hold: options.hold ?? (async () => (options.held ? null : () => {})),
     forgetDevice: async (seed) => {
       forgotten.push(`seed ${seed[0]}`);
     },
@@ -179,12 +185,22 @@ describe("controller", () => {
     }
   });
 
-  test("a link started while a restart names the old account wins", async () => {
+  test("a link started over a stored link is refused, and the stored link stays", async () => {
     const h = await harness({ confirmed: false });
     const restarting = h.controller.start();
-    void h.controller.link("Obsidian", new AbortController().signal);
+    const linking = h.controller
+      .link("Obsidian", new AbortController().signal)
+      .then(
+        () => "linked",
+        (error: Error) => error.message,
+      );
     await restarting;
-    expect(h.controller.phase.kind).toBe("linking");
+    expect(
+      await Promise.race([linking, Bun.sleep(500).then(() => "linking")]),
+    ).toMatch(/still linked/u);
+    expect(h.controller.phase.kind).toBe("confirm");
+    expect(h.custody.seed()).not.toBeNull();
+    expect(h.forgotten).toEqual([]);
   });
 
   test("a second window of the same vault doesn't open a second transport", async () => {
@@ -247,5 +263,234 @@ describe("controller", () => {
     );
     expect(h.local.text(copy ?? "")).toBe("edit the rotation stranded");
     h.controller.close();
+  });
+
+  test("a stop or a removal is told once in a notice, since mobile has no status bar", async () => {
+    const h = await harness({ held: true });
+    await h.controller.start();
+    await h.controller.syncNow();
+    expect(h.notices).toEqual([`Syncing stopped. ${LOCKED_ELSEWHERE}`]);
+
+    let removed: DeviceOptions["onRemoved"];
+    const r = await harness({
+      onOpen: (options) => {
+        removed = options.onRemoved;
+      },
+    });
+    await r.controller.start();
+    await removed?.("removed");
+    expect(r.controller.phase.kind).toBe("removed");
+    expect(r.notices).toEqual([REMOVED.removed]);
+  });
+
+  test("a reopen waits for a token refresh the closed device already sent", async () => {
+    const refresh = Promise.withResolvers<Response>();
+    let opens = 0;
+    let held = false;
+    const h = await harness({
+      fetch: () => refresh.promise,
+      hold: async () => {
+        if (held) return null;
+        held = true;
+        return () => {
+          held = false;
+        };
+      },
+      onOpen: (options) => {
+        if (++opens === 1)
+          void options.fetch?.("https://id.example/refresh", {
+            method: "POST",
+          });
+      },
+    });
+    await h.controller.start();
+    h.controller.close();
+    const reopening = h.controller.start();
+    await Bun.sleep(100);
+    expect(opens).toBe(1);
+    expect(h.controller.phase.kind).not.toBe("stopped");
+    refresh.resolve(new Response("{}"));
+    await reopening;
+    expect(opens).toBe(2);
+    expect(h.controller.phase.kind).toBe("open");
+    h.controller.close();
+  });
+});
+
+/** A device vault over `remote`; `beforeSave` can hold a save open mid-round. */
+function deviceOver(
+  remote: MemoryRemote,
+  hooks: { beforeSave?: () => Promise<void> } = {},
+) {
+  const listeners = new Set<SyncListener>();
+  return {
+    read: () => remote.read().then((view) => ({ ...view, folders: [] })),
+    saveNote: async (note, options) => {
+      await hooks.beforeSave?.();
+      return remote.saveNote(note, options);
+    },
+    listAttachments: async () =>
+      (await remote.listAttachments()).map((item) => ({
+        ...item,
+        mime: "application/octet-stream",
+        size: 0,
+      })),
+    readAttachment: (id) => remote.readAttachment(id),
+    saveAttachment: (attachment, options) =>
+      remote.saveAttachment(attachment, options),
+    rename: (id, path, base) => remote.rename(id, path, base),
+    remove: (id, base) => remote.remove(id, base),
+    compose: async () => ({ selectedId: "" }),
+    sync: async () => {
+      for (const listener of listeners) await listener("Synced");
+    },
+    subscribe: (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    subscribeChanges: () => () => {},
+    subscribeTrustLoss: () => () => {},
+    stop: () => {},
+  } as DeviceVault;
+}
+
+/**
+ * A linked, confirmed vault whose opens answer from `opens` in turn, and
+ * whose next link is device 2. Indexes are named by whatever the controller
+ * passes, as the plugin names their databases.
+ */
+function linkedVault(local: MemoryVault, opens: (() => DeviceVault)[]) {
+  const secrets = new Secrets();
+  const custody = new Custody(secrets, "0123456789abcdef");
+  const credentialsOf = (deviceId: string) => ({ ...credentials, deviceId });
+  custody.saveSeed(new Uint8Array(32).fill(1));
+  void custody.credentials.write(credentialsOf("device-1"));
+  void custody.checkpoints.write(checkpoint);
+  custody.confirmAccount({ did });
+  const indexes = new Map<string, MemoryIndex>();
+  const controller = new SyncController({
+    custody,
+    device: {
+      createDeviceSeed: () => new Uint8Array(32).fill(2),
+      linkDevice: async (_seed, options) => {
+        await options.credentials.write(credentialsOf("device-2"));
+        await options.checkpoints.write(checkpoint);
+        return checkpoint;
+      },
+      openDeviceVault: async () => {
+        const open = opens.shift();
+        if (!open) throw new Error("No more opens");
+        return open();
+      },
+      locked: "Locked",
+      pulled: (status) => status === "Synced",
+      stale: isStale,
+    },
+    host: "https://id.example",
+    fetch: async () => new Response(null, { status: 404 }),
+    local,
+    configDir: ".obsidian",
+    indexFor: (...key: unknown[]) => {
+      const name = JSON.stringify(key);
+      const index = indexes.get(name) ?? new MemoryIndex();
+      indexes.set(name, index);
+      return index;
+    },
+    forgetIndexes: async () => indexes.clear(),
+    hold: async () => () => {},
+    forgetDevice: async () => {},
+    confirmDeletions: async () => true,
+    onChange: () => {},
+    onTrustLoss: () => {},
+    notify: () => {},
+  });
+  return { controller, secrets, indexes };
+}
+
+describe("controller: linking again", () => {
+  for (const way of ["over a stopped link", "after the secrets were lost"])
+    test(`${way} never plans against the old device's index, so edits that never left it survive`, async () => {
+      const local = new MemoryVault();
+      // NOTE on the PDS, and device 1's own database, whose writes never got uploaded.
+      const server = new MemoryRemote();
+      const outbox = new MemoryRemote();
+      server.put("a", "A.md", "v1");
+      outbox.put("a", "A.md", "v1");
+      local.put("A.md", "v1");
+      const offline = () => {
+        throw new Error("Failed to fetch");
+      };
+      const { controller, secrets } = linkedVault(
+        local,
+        way === "over a stopped link"
+          ? [() => deviceOver(outbox), offline, () => deviceOver(server)]
+          : [() => deviceOver(outbox), () => deviceOver(server)],
+      );
+      await controller.start();
+      await controller.syncNow();
+      local.put("A.md", "v2, typed offline");
+      local.put("New.md", "a new note, typed offline");
+      await controller.syncNow();
+      expect(outbox.text("A.md")).toBe("v2, typed offline");
+      expect(server.text("A.md")).toBe("v1");
+      controller.close();
+
+      if (way === "over a stopped link") {
+        await controller.start();
+        expect(controller.phase.kind).toBe("stopped");
+      } else {
+        secrets.values.clear();
+        await controller.start();
+        expect(controller.phase.kind).toBe("unlinked");
+      }
+      const signal = new AbortController().signal;
+      // Settings offer only Retry and Unlink on a stopped link; the person unlinks, then links.
+      await controller
+        .link("Obsidian", signal)
+        .catch(() =>
+          controller.unlink().then(() => controller.link("Obsidian", signal)),
+        );
+      await controller.confirm();
+      await controller.syncNow();
+      await Bun.sleep(5);
+      controller.close();
+
+      const texts = [...local.files.keys()].map((path) => local.text(path));
+      expect(texts).toContain("v2, typed offline");
+      expect(texts).toContain("a new note, typed offline");
+      expect(local.trashed).toEqual([]);
+      expect(server.text("New.md")).toBe("a new note, typed offline");
+    });
+
+  test("an unlink during a round's write leaves no sync index behind", async () => {
+    const local = new MemoryVault();
+    const remote = new MemoryRemote();
+    let release = () => {};
+    let blocked = false;
+    const { controller, indexes } = linkedVault(local, [
+      () =>
+        deviceOver(remote, {
+          beforeSave: () =>
+            blocked
+              ? new Promise<void>((resolve) => {
+                  release = resolve;
+                })
+              : Promise.resolve(),
+        }),
+    ]);
+    local.put("Old.md", "synced before");
+    await controller.start();
+    await controller.syncNow();
+    expect(indexes.size).toBe(1);
+    local.put("A.md", "a");
+    blocked = true;
+    const syncing = controller.syncNow();
+    await Bun.sleep(5);
+    await controller.unlink();
+    release();
+    await syncing;
+    await Bun.sleep(5);
+    expect(controller.phase.kind).toBe("unlinked");
+    expect([...indexes.values()].flatMap((index) => index.entries)).toEqual([]);
   });
 });

@@ -119,13 +119,13 @@ export class Custody {
     const current = () => generation === this.generation;
     return {
       credentials: {
-        read: this.credentials.read,
+        read: () => this.credentials.read(),
         write: async (value) => {
           if (current()) await this.credentials.write(value);
         },
       },
       checkpoints: {
-        read: this.checkpoints.read,
+        read: () => this.checkpoints.read(),
         write: async (value) => {
           if (current()) await this.checkpoints.write(value);
         },
@@ -147,6 +147,13 @@ export class Custody {
   saveSeed(seed: Uint8Array) {
     if (seed.length !== 32) throw new Error("Invalid device seed");
     this.backend.set(this.ids.seed, toBase64Url(seed));
+  }
+
+  /** Whether a link's tokens are stored, whether or not its account was confirmed. */
+  linked(): boolean {
+    return (
+      asCredentials(parsed(this.backend.get(this.ids.credentials))) !== null
+    );
   }
 
   /** The account the person confirmed this vault syncs with; nothing uploads before it is set. */

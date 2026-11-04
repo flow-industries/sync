@@ -1,5 +1,5 @@
 import { type App, Modal, Notice, Setting } from "obsidian";
-import type { LinkedAccount } from "../account";
+import { handleDomain, type LinkedAccount } from "../account";
 import type { SyncController } from "../controller";
 import type { LinkPrompt } from "../device";
 
@@ -93,6 +93,12 @@ export class LinkModal extends Modal {
       contentEl.createEl("p", { text: "This vault is linked and syncing." });
       return;
     }
+    if (phase.kind === "stopped") {
+      contentEl.createEl("p", {
+        text: `This vault is still linked, but syncing stopped: ${phase.message} Retry from this plugin's settings, or unlink the vault there before linking it again.`,
+      });
+      return;
+    }
     contentEl.createEl("p", {
       text: "This vault becomes a device on your NOTE notepad. You approve it once in your browser; after that it syncs without asking for your passkey.",
     });
@@ -134,7 +140,7 @@ export class LinkModal extends Modal {
       .setDesc(
         "Type it on the link page. Never send it to anyone: it proves this vault is the device you approve.",
       );
-    secret.controlEl.createEl("span", {
+    secret.controlEl.createSpan({
       cls: "flow-note-code",
       text: prompt.pairingCode,
     });
@@ -153,14 +159,15 @@ export class LinkModal extends Modal {
   private renderConfirm(account: LinkedAccount) {
     const { contentEl } = this;
     contentEl.createEl("p", { text: "This vault is linked to this account:" });
-    contentEl.createEl("p", {
-      cls: "flow-note-code",
-      text: accountName(account),
-    });
+    if (account.handle)
+      new Setting(contentEl)
+        .setName(`@${account.handle}`)
+        .setDesc(`Vouched for by the domain ${handleDomain(account.handle)}`);
+    new Setting(contentEl).setName("DID").setDesc(account.did);
     contentEl.createEl("p", {
       text: account.handle
-        ? "Your notes will sync with this account's NOTE notepad. Continue only if it's yours."
-        : "The account's handle couldn't be confirmed, so this is its DID. Your notes will sync with this account's NOTE notepad. Continue only if it's yours.",
+        ? "Your notes will sync with this account's NOTE notepad. Check it is the account NOTE shows you, and that you know the domain: a handle under a domain you don't, however close it looks, isn't yours."
+        : "The account's handle couldn't be confirmed, so this is its DID. Check it is the account NOTE shows you: your notes will sync with this account's NOTE notepad.",
     });
     new Setting(contentEl)
       .addButton((button) =>

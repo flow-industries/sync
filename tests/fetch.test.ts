@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { IDBFactory } from "fake-indexeddb";
-import { linkedAccount } from "../src/account";
+import { handleDomain, linkedAccount } from "../src/account";
 import type { NoteDeviceFetch } from "../src/device";
 import { type RequestUrl, requestUrlFetch } from "../src/fetch";
-import { IndexedDbIndex } from "../src/index-store";
+import { deleteIndexes, IndexedDbIndex, indexName } from "../src/index-store";
 
 describe("fetch over requestUrl", () => {
   test("passes method, headers and bytes through, and answers a real Response", async () => {
@@ -83,6 +83,36 @@ describe("the linked account", () => {
   });
 });
 
+describe("the linked account's handle", () => {
+  const did = "did:plc:abcdefghijklmnopqrstuvwx";
+  const document = { id: did, alsoKnownAs: ["at://alice.example.com"] };
+  const documentOnly: NoteDeviceFetch = async (url) =>
+    url === `https://plc.directory/${did}`
+      ? Response.json(document)
+      : new Response("not found", { status: 404 });
+
+  test("is also verified by DNS where the platform can look it up", async () => {
+    const dns = async (name: string) =>
+      name === "_atproto.alice.example.com" ? [[`did=${did}`], ["v=spf1"]] : [];
+    expect(await linkedAccount(did, documentOnly, dns)).toEqual({
+      did,
+      handle: "alice.example.com",
+    });
+    expect(await linkedAccount(did, documentOnly)).toEqual({ did });
+    const two = async () => [[`did=${did}`], ["did=did:plc:other"]];
+    expect(await linkedAccount(did, documentOnly, two)).toEqual({ did });
+    const elsewhere = async () => [["did=did:plc:other"]];
+    expect(await linkedAccount(did, documentOnly, elsewhere)).toEqual({ did });
+  });
+
+  test("shows the domain that vouched for it, so a lookalike reads as itself", () => {
+    expect(handleDomain("alice.flow.talk")).toBe("flow.talk");
+    expect(handleDomain("alice-flow.talk.example")).toBe("talk.example");
+    expect(handleDomain("alice.example.co.uk")).toBe("example.co.uk");
+    expect(handleDomain("example.org")).toBe("example.org");
+  });
+});
+
 describe("the sync index", () => {
   test("persists in its own IndexedDB database", async () => {
     const factory = new IDBFactory();
@@ -101,5 +131,23 @@ describe("the sync index", () => {
     expect(
       await new IndexedDbIndex("flow-note-sync:test", factory).load(),
     ).toEqual([entry]);
+  });
+
+  test("is one database per linked device, and forgetting deletes only this vault's", async () => {
+    const factory = new IDBFactory();
+    const link = { did: "did:plc:x", vault: "v" };
+    const first = indexName("aaaaaaaaaaaaaaaa", { ...link, deviceId: "d1" });
+    const second = indexName("aaaaaaaaaaaaaaaa", { ...link, deviceId: "d2" });
+    const other = indexName("bbbbbbbbbbbbbbbb", { ...link, deviceId: "d1" });
+    expect(new Set([first, second, other]).size).toBe(3);
+    for (const name of [
+      first,
+      second,
+      other,
+      "flow-note-sync:aaaaaaaaaaaaaaaa:did:plc:x:v",
+    ])
+      await new IndexedDbIndex(name, factory).save([]);
+    await deleteIndexes("aaaaaaaaaaaaaaaa", factory);
+    expect((await factory.databases()).map((db) => db.name)).toEqual([other]);
   });
 });
