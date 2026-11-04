@@ -53,9 +53,13 @@ export interface RemoteAttachmentView {
   revision: string;
   digest: string;
 }
-/** `repairLinks: false`: a note's move leaves the links to it as they are written. */
+/**
+ * Which notes' links to a moved note NOTE rewrites: all of them by
+ * default, none with `false`, or those a predicate accepts, by each linking
+ * note's path after the move.
+ */
 export interface MoveOptions {
-  repairLinks?: boolean;
+  repairLinks?: boolean | ((linkingNotePath: string) => boolean);
 }
 /** `current`: the write is refused unless its base is the stored revision. */
 export interface WriteOptions extends MoveOptions {
@@ -152,13 +156,16 @@ const deletionsOf = (steps: readonly Step[]): Deletions => ({
  */
 export type LinkRepair = "all" | "unindexed";
 /**
- * The device client's `repairLinks` for each. It takes only a yes or no for
- * now, so `unindexed` repairs nothing: a second repair of what Obsidian
- * already updated re-targets links in chains and swaps.
+ * The device client's `repairLinks` for each. `unindexed` leaves `.md`
+ * notes alone, since a second repair of what Obsidian already updated
+ * re-targets links in chains and swaps.
  */
-const REPAIR_LINKS: Record<LinkRepair, boolean> = {
+const REPAIR_LINKS: Record<
+  LinkRepair,
+  NonNullable<MoveOptions["repairLinks"]>
+> = {
   all: true,
-  unindexed: false,
+  unindexed: (path) => !path.endsWith(".md"),
 };
 const baseOf = (item: RemoteItem): RevisionBase | undefined =>
   item.revision && item.digest

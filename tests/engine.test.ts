@@ -171,7 +171,7 @@ describe("engine: after the first sync", () => {
     ]);
   });
 
-  test("moves NOTE's copy without repairing links, as Obsidian already updated them", async () => {
+  test("moves NOTE's copy repairing only links Obsidian never updates", async () => {
     const w = await synced();
     await w.local.move("A.md", "Moved/A2.md");
     w.engine.renamed("A.md", "Moved/A2.md", true);
@@ -182,7 +182,9 @@ describe("engine: after the first sync", () => {
     w.remote.options = [];
     await settled(w);
     expect(remotePaths(w.remote)).toEqual(["A3.md: one, edited", "B.md: two"]);
-    expect(w.remote.options).toEqual([{ current: true, repairLinks: false }]);
+    const [save] = w.remote.options as { repairLinks?: unknown }[];
+    expect(save).toMatchObject({ current: true });
+    expect(typeof save?.repairLinks).toBe("function");
   });
 
   test("has NOTE repair links only where Obsidian didn't update them", async () => {
@@ -204,7 +206,12 @@ describe("engine: after the first sync", () => {
     const unseen = await repairs(async (w) => {
       await w.local.move("A.md", "Z.md");
     });
-    expect(updatedHere).toEqual([{ repairLinks: false }]);
+    // Obsidian updated .md notes' links; NOTE repairs only the rest, such as .mdx notes.
+    const [{ repairLinks } = {}] = updatedHere;
+    expect(typeof repairLinks).toBe("function");
+    const repaired = repairLinks as (path: string) => boolean;
+    expect(repaired("Index.md")).toBe(false);
+    expect(repaired("Index.mdx")).toBe(true);
     expect(updatesOff).toEqual([{ repairLinks: true }]);
     expect(unseen).toEqual([{ repairLinks: true }]);
   });

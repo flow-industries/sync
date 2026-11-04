@@ -417,8 +417,7 @@ describe("links in another note across renames made in Obsidian", () => {
     expect(vault.local.text("Index.md")).toMatch(/^see \[\[\/?Zeta\]\]$/u);
   }, 60_000);
 
-  // Pending a device-client option to repair links only in notes Obsidian doesn't index.
-  test.failing("an MDX note's links, which Obsidian never updates, follow a rename it made", async () => {
+  test("an MDX note's links, which Obsidian never updates, follow a rename it made", async () => {
     const vault = await linkedWith({
       "Alpha.md": "alpha",
       "Index.mdx": "see [[Alpha]]",
