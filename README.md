@@ -1,12 +1,12 @@
-# NOTE Sync
+# FLOW NOTE Sync
 
 An Obsidian plugin that keeps a vault in sync, both ways, with your end-to-end encrypted [NOTE](https://note.flow.talk) notepad. You approve it once in your browser; after that it syncs without asking for your passkey. Notes are encrypted on this device before they leave it.
 
-NOTE Sync needs a Flow ID account with a NOTE notepad, and Obsidian 1.11.5 or later.
+FLOW NOTE Sync needs a Flow ID account with a NOTE notepad, and Obsidian 1.11.5 or later.
 
 ## Linking
 
-1. Open **Settings → NOTE Sync** and select **Link**, or run **NOTE Sync: Link this vault** from the command palette.
+1. Open **Settings → FLOW NOTE Sync** and select **Link**, or run **FLOW NOTE Sync: Link this vault** from the command palette.
 2. The plugin shows a code and a 12-digit device code, and opens `note.flow.talk/link` in your browser.
 3. On that page, sign in if asked, check the code, type the device code and approve with your passkey. The device code never leaves this device any other way: Flow ID only ever sees a slow hash of it, so it can't swap in keys or a notepad of its own.
 4. Back in Obsidian, the plugin shows the account it was linked to (its handle, when the handle checks out both ways, and its DID). **Nothing syncs until you confirm it is yours.** A code someone else guessed and approved would otherwise bind your vault to their notepad.
@@ -18,7 +18,7 @@ A link has to be approved within ten minutes.
 - **Notes and attachments:** every Markdown (`.md`) and MDX (`.mdx`) note, and every other file (images, PDFs, audio and the rest) up to 32 MB, both ways.
 - **Renames** carry across, including folder renames. A rename the plugin didn't see (Obsidian was closed) is recognised by the file's unchanged content. When you rename an attachment here, Obsidian updates the links to it, and those edits sync like any other.
 - **Deletions** move the file to the trash on the other side: Obsidian's trash here, NOTE's trash there. An edit beats a deletion: if one side edited a file the other deleted, it comes back. Before a sync would trash more than ten files and more than a tenth of the vault at once, the plugin asks.
-- **Conflicts:** when both sides changed the same file, NOTE's version keeps the name and this vault's is saved beside it. A note's copy is named `<name> conflict <8 hex>.md`, the way NOTE names its own conflict copies; an attachment's keeps its extension last, `<name> conflict <8 hex>.png`, so Obsidian still opens it. Nothing is overwritten while you type: a file that changes during a sync, or an open note with unsaved typing, is left alone until the next sync.
+- **Conflicts:** when both sides changed the same file, NOTE's version keeps the name and this vault's is saved beside it. A note's copy is named `<name> conflict <8 hex>.md`, the way NOTE names its own conflict copies; an attachment's keeps its extension last, `<name> conflict <8 hex>.png`, so Obsidian still opens it. Nothing is overwritten while you type: a file that changes during a sync, or an open note with unsaved typing, is left alone until the next sync. The same holds in NOTE: every write names the version it was planned from, so an edit that reaches NOTE during a sync is never replaced or trashed; the sync reads again and plans from there.
 
 **Not synced:**
 
@@ -76,7 +76,7 @@ bun run build      # main.js at the repository root
 bun run smoke      # loads main.js as Obsidian does, with no Node modules
 ```
 
-Obsidian's API is used only under `src/obsidian/` and `src/main.ts`; everything else runs under `bun test`. To try a build, copy `main.js`, `manifest.json` and `styles.css` into `<vault>/.obsidian/plugins/flow-note/` and enable **NOTE Sync** under **Settings → Community plugins**.
+Obsidian's API is used only under `src/obsidian/` and `src/main.ts`; everything else runs under `bun test`. To try a build, copy `main.js`, `manifest.json` and `styles.css` into `<vault>/.obsidian/plugins/flow-note/` and enable **FLOW NOTE Sync** under **Settings → Community plugins**.
 
 ## Releasing
 

@@ -2,7 +2,7 @@
   "name": "flow-note-sync",
   "private": true,
   "version": "0.1.0",
-  "description": "NOTE Sync for Obsidian",
+  "description": "FLOW NOTE Sync for Obsidian",
   "license": "MIT",
   "type": "module",
   "scripts": {

@@ -8,22 +8,22 @@ import { custodyNote } from "./vault";
 export function statusText(phase: Phase, round: RoundResult | null): string {
   switch (phase.kind) {
     case "unlinked":
-      return "NOTE: not linked";
+      return "FLOW NOTE: not linked";
     case "linking":
-      return "NOTE: linking";
+      return "FLOW NOTE: linking";
     case "confirm":
-      return "NOTE: confirm account";
+      return "FLOW NOTE: confirm account";
     case "opening":
-      return "NOTE: connecting";
+      return "FLOW NOTE: connecting";
     case "removed":
-      return "NOTE: device removed";
+      return "FLOW NOTE: device removed";
     case "stopped":
-      return "NOTE: stopped";
+      return "FLOW NOTE: stopped";
     case "open": {
       const failed = round?.failed.length ?? 0;
       const held = (round?.held.local ?? 0) + (round?.held.remote ?? 0);
       return [
-        `NOTE: ${phase.status}`,
+        `FLOW NOTE: ${phase.status}`,
         failed ? `${failed} not synced` : "",
         held ? `${held} deletions held` : "",
       ]
