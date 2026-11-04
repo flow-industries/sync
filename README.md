@@ -9,25 +9,29 @@ FLOW NOTE Sync needs a Flow ID account with a NOTE notepad, and Obsidian 1.11.5 
 1. Open **Settings → FLOW NOTE Sync** and select **Link**, or run **FLOW NOTE Sync: Link this vault** from the command palette.
 2. The plugin shows a code and a 12-digit device code, and opens `note.flow.talk/link` in your browser.
 3. On that page, sign in if asked, check the code, type the device code and approve with your passkey. The device code never leaves this device any other way: Flow ID only ever sees a slow hash of it, so it can't swap in keys or a notepad of its own.
-4. Back in Obsidian, the plugin shows the account it was linked to (its handle, when the handle checks out both ways, and its DID). **Nothing syncs until you confirm it is yours.** A code someone else guessed and approved would otherwise bind your vault to their notepad.
+4. Back in Obsidian, the plugin shows the account it was linked to: its DID, and its handle when the handle checks out both ways, with the domain that vouched for it set apart so a lookalike such as `alice-flow.talk.example` reads as `talk.example`. **Nothing syncs until you confirm it is yours.** A code someone else guessed and approved would otherwise bind your vault to their notepad.
 
-A link has to be approved within ten minutes.
+A link has to be approved within ten minutes. A vault that is still linked can't be linked again: if syncing stopped, settings offer **Retry** and **Unlink**, and you link again only after unlinking.
+
+Syncing starts once the device has read your whole notepad. Until then, nothing here is uploaded or deleted, so a new link never mistakes a notepad it hasn't read yet for an empty one.
 
 ## What syncs
 
 - **Notes and attachments:** every Markdown (`.md`) and MDX (`.mdx`) note, and every other file (images, PDFs, audio and the rest) up to 32 MB, both ways.
 - **Renames** carry across, including folder renames. A rename the plugin didn't see (Obsidian was closed) is recognised by the file's unchanged content. When you rename an attachment here, Obsidian updates the links to it, and those edits sync like any other.
-- **Deletions** move the file to the trash on the other side: Obsidian's trash here, NOTE's trash there. An edit beats a deletion: if one side edited a file the other deleted, it comes back. Before a sync would trash more than ten files and more than a tenth of the vault at once, the plugin asks.
+- **Deletions** carry across. In NOTE they go to NOTE's trash. Here they follow Obsidian's **Deleted files** setting: the system trash, the vault's `.trash` folder, or, if you chose to delete permanently, a permanent deletion, though NOTE's trash still has the file. An edit beats a deletion: if one side edited a file the other deleted, it comes back. Before a sync would delete more than fifty files, or more than ten that are also over a tenth of the vault, the plugin asks.
+- **Swapped names** carry across too: two files that trade names, on either side, converge. While one waits for the other to leave its name, it may briefly sit beside it as `<name> moving <8 hex>.md`.
 - **Conflicts:** when both sides changed the same file, NOTE's version keeps the name and this vault's is saved beside it. A note's copy is named `<name> conflict <8 hex>.md`, the way NOTE names its own conflict copies; an attachment's keeps its extension last, `<name> conflict <8 hex>.png`, so Obsidian still opens it. Nothing is overwritten while you type: a file that changes during a sync, or an open note with unsaved typing, is left alone until the next sync. The same holds in NOTE: every write names the version it was planned from, so an edit that reaches NOTE during a sync is never replaced or trashed; the sync reads again and plans from there.
 
 **Not synced:**
 
 - Obsidian's config folder (`.obsidian/`) and anything hidden. The config folder holds plugin code, so nothing from NOTE is ever written into it.
-- Attachments over 32 MB, names NOTE can't store (such as `con.md` or a name ending in a dot), names that differ from a synced file's only in case, and NOTE files whose names this vault can't hold. Settings lists them. A synced file that becomes one of these is left as it is on both sides, never deleted.
+- Scripts that other plugins run from the vault: `.js`, `.mjs`, `.cjs`, `.jsx`, `.py` and `.sh` files (Dataview views, Templater and QuickAdd user scripts, CustomJS and the like). Synced, they would let any device linked to your notepad run code on this one.
+- Attachments over 32 MB, names NOTE can't store (such as `con.md` or a name ending in a dot), names that differ from a synced file's only in case, and NOTE files whose names this vault can't hold. Settings lists them. A synced file that becomes one of these is left as it is on both sides, never deleted. The exception is a file moved into a hidden folder from outside Obsidian: Obsidian doesn't list hidden files, so to the plugin that reads as a deletion, and NOTE's copy goes to NOTE's trash.
 
 ## Note content never runs
 
-The plugin treats every note as text. It never evaluates MDX, code blocks or anything else in a note. Other plugins you install may: Dataview's JavaScript queries or Templater, for example, run code from notes, and with sync on, those notes can come from your other devices.
+The plugin treats every note as text. It never evaluates MDX, code blocks or anything else in a note, and it doesn't sync script files (see above). Other plugins you install may run code from notes: Dataview's JavaScript queries or Templater templates, for example. With sync on, those notes can come from your other devices.
 
 ## Where the device key lives
 
@@ -46,20 +50,21 @@ Trade-offs to know:
 
 - **Plugins aren't isolated from each other.** Any plugin you install runs with the same access as this one and could read Obsidian's secret storage. Install plugins you trust.
 - **Mobile secret storage is shared by every vault on the device**, so each vault's link lives under its own random name.
-- **On mobile, Obsidian saves a secret in the background.** Flow ID rotates the refresh token on every refresh; if the app is killed in the instant between a refresh and that save, the next start presents the old token, Flow ID refuses it, and you link again. Nothing is lost: your notes are on both sides.
+- **Obsidian saves secrets in the background.** On mobile the native write isn't awaited, and on desktop the encrypted secrets go to app storage that is written to disk lazily. Flow ID rotates the refresh token on every refresh; if Obsidian is killed in the instant between a refresh and that save, the next start presents the old token, Flow ID refuses it, and you link again. Nothing is lost: your notes are on both sides.
 
-The plugin also keeps two caches in Obsidian's app data, never in the vault: the device client's encrypted local database, named for this device alone, and an index of what was last synced.
+The plugin also keeps two caches in Obsidian's app data, never in the vault: the device client's encrypted local database and an index of what was last synced, each named for this link alone. A new link starts both afresh.
 
 ## Removing access
 
-- **Unlink** (in settings or the command palette) stops syncing and forgets the device seed, its tokens, its local database and the sync index on this device. Your files stay. Remove the device under **Access** in NOTE too.
-- **Removing the device** under Access in NOTE, or Flow ID revoking it, stops the plugin at its next sync: it wipes the same, writes nothing more, and asks you to link again. Your files stay.
+- **Unlink** (in settings or the command palette) stops syncing and forgets the device seed, its tokens, its local database and the sync index on this device. Your files stay. Flow ID can only revoke a device from NOTE, so remove it under **Access** in NOTE too: until then its tokens stay valid.
+- **Removing the device** under Access in NOTE, or Flow ID revoking it, stops the plugin at its next sync: it wipes the same, writes nothing more, and says so in a notice that stays until you close it. Your files stay. Link again to keep syncing.
+- **Any other stop** (offline at startup, the vault open in another window, a check that failed) shows a notice too, once per reason, and settings offer **Retry**.
 
 ## Network use
 
 - **id.flow.industries** (Flow ID): links the device, refreshes its tokens, and relays your encrypted notepad to and from your PDS. Only the device name, its public keys, a slow hash of the device code and ciphertext leave this device.
 - **note.flow.talk**: opened in your browser to approve the link. The plugin itself doesn't contact it.
-- **plc.directory**, or a `did:web` account's own domain, and **your handle's domain** (`https://<handle>/.well-known/atproto-did`): read once at linking to show the account's handle.
+- **plc.directory**, or a `did:web` account's own domain, and **your handle's domain** (`https://<handle>/.well-known/atproto-did`, and on desktop the DNS record `_atproto.<handle>` through your system's resolver): read once at linking to show the account's handle.
 
 The plugin sends no telemetry.
 
@@ -70,6 +75,7 @@ Use Bun 1.4.2.
 ```bash
 bun install --frozen-lockfile
 bun run lint
+bun run lint:obsidian   # the rules Obsidian's community-plugin review runs
 bun run typecheck
 bun test           # unit tests and the end-to-end run against an in-memory Flow ID and PDS
 bun run build      # main.js at the repository root

@@ -25,17 +25,22 @@ async function bodyOf(
     return body.buffer.slice(
       body.byteOffset,
       body.byteOffset + body.byteLength,
-    ) as ArrayBuffer;
+    );
   if (body instanceof Blob) return body.arrayBuffer();
   if (body instanceof URLSearchParams) return body.toString();
   throw new Error("Unsupported request body");
 }
 
+const reasonOf = (signal: AbortSignal) =>
+  signal.reason instanceof Error
+    ? signal.reason
+    : new Error("The request was aborted.");
+
 function aborted(signal: AbortSignal | null | undefined): Promise<never> {
   return new Promise((_, reject) => {
     if (!signal) return;
-    if (signal.aborted) reject(signal.reason);
-    signal.addEventListener("abort", () => reject(signal.reason), {
+    if (signal.aborted) reject(reasonOf(signal));
+    signal.addEventListener("abort", () => reject(reasonOf(signal)), {
       once: true,
     });
   });
