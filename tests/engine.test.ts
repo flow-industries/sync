@@ -378,6 +378,63 @@ describe("engine: renames into names other items are leaving", () => {
     expect(parked(w)).toEqual([]);
   });
 
+  for (const side of ["here", "in NOTE"] as const)
+    test(`a quit right after a swap ${side} parked one note still ends at the swapped names`, async () => {
+      const w = await three();
+      const restarted = () =>
+        new SyncEngine({
+          local: w.local,
+          remote: w.remote,
+          index: w.index,
+          configDir: ".obsidian",
+          stale: isStale,
+        });
+      const quitting = restarted();
+      await quitting.load();
+      // Obsidian quits the moment one note lands on its temporary name.
+      const rename = w.remote.rename.bind(w.remote);
+      w.remote.rename = async (id, path, base) => {
+        const saved = await rename(id, path, base);
+        if (path.includes(" moving ")) quitting.stop();
+        return saved;
+      };
+      const move = w.local.move.bind(w.local);
+      w.local.move = async (from, to) => {
+        const moved = await move(from, to);
+        if (to.includes(" moving ")) quitting.stop();
+        return moved;
+      };
+      if (side === "here") {
+        for (const [from, to] of [
+          ["A.md", "tmp.md"],
+          ["B.md", "A.md"],
+          ["tmp.md", "B.md"],
+        ] as const) {
+          await move(from, to);
+          quitting.renamed(from, to);
+        }
+      } else {
+        const a = w.remote.byPath("A.md")?.id ?? "";
+        const b = w.remote.byPath("B.md")?.id ?? "";
+        await rename(a, "tmp.md");
+        await rename(b, "A.md");
+        await rename(a, "B.md");
+      }
+      await quitting.run();
+      expect(parked(w).length).toBeGreaterThan(0);
+      w.remote.rename = rename;
+      w.local.move = move;
+
+      const after = restarted();
+      await after.load();
+      for (let round = 0; round < 3; round++) {
+        after.remoteChanged();
+        await after.run();
+      }
+      expect(localPaths(w.local)).toEqual(["A.md: b", "B.md: a", "C.md: c"]);
+      expect(remotePaths(w.remote)).toEqual(["A.md: b", "B.md: a", "C.md: c"]);
+    });
+
   test("a chain of renames goes in order, never through a temporary name", async () => {
     const w = await three();
     await moveHere(w, "C.md", "D.md");

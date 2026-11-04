@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { SyncListener } from "@flow-industries/seal";
 import {
   type ControllerOptions,
+  KEY_MISSING,
   LOCKED_ELSEWHERE,
   REMOVED,
   STRANDED,
@@ -265,6 +266,20 @@ describe("controller", () => {
     h.controller.close();
   });
 
+  test("a link whose key went missing stops with Unlink as the way out", async () => {
+    const h = await harness({ confirmed: false });
+    h.secrets.values.delete("flow-note-0123456789abcdef-seed");
+    await h.controller.start();
+    expect(h.controller.phase).toEqual({
+      kind: "stopped",
+      message: KEY_MISSING,
+    });
+    expect(h.controller.stored()).toBe(true);
+    await h.controller.unlink();
+    expect(h.controller.phase.kind).toBe("unlinked");
+    expect(h.controller.stored()).toBe(false);
+  });
+
   test("a stop or a removal is told once in a notice, since mobile has no status bar", async () => {
     const h = await harness({ held: true });
     await h.controller.start();
@@ -274,7 +289,7 @@ describe("controller", () => {
     let removed: DeviceOptions["onRemoved"];
     const r = await harness({
       onOpen: (options) => {
-        removed = options.onRemoved;
+        removed = (reason) => options.onRemoved?.(reason) ?? Promise.resolve();
       },
     });
     await r.controller.start();

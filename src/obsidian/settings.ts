@@ -102,12 +102,7 @@ export class NoteSyncSettingTab extends PluginSettingTab {
         );
       this.roundDetails(containerEl, controller.lastRound);
     }
-    if (
-      account ||
-      linked ||
-      phase.kind === "confirm" ||
-      phase.kind === "stopped"
-    )
+    if (controller.stored())
       new Setting(containerEl)
         .setName("Unlink")
         .setDesc(

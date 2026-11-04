@@ -1,4 +1,4 @@
-import { type LinkedAccount, linkedAccount, type ResolveTxt } from "./account";
+import { type LinkedAccount, linkedAccount } from "./account";
 import type { Custody } from "./custody";
 import type {
   DeviceOptions,
@@ -57,6 +57,8 @@ export const LOCKED_ELSEWHERE =
   "This vault is already syncing in another Obsidian window.";
 export const ALREADY_LINKED =
   "This vault is still linked. Unlink it before linking it again.";
+export const KEY_MISSING =
+  "This vault's device key is missing from Obsidian's secret storage, though its link isn't. Unlink it, then link it again.";
 
 export interface ControllerOptions {
   custody: Custody;
@@ -64,8 +66,6 @@ export interface ControllerOptions {
   /** Flow ID's origin. */
   host: string;
   fetch: NoteDeviceFetch;
-  /** DNS TXT lookups, for handles verified that way; absent where the platform has none. */
-  resolveTxt?: ResolveTxt;
   local: LocalVault;
   configDir: string;
   /** The index of one linked device: a new link never plans against another device's base. */
@@ -118,16 +118,35 @@ export class SyncController {
   private released: Promise<void> = Promise.resolve();
   /** The last stop or removal told to the person, so a retry that fails the same way stays quiet. */
   private told: string | null = null;
+  /** Bumped by every `forget`, so an engine opened before it never saves into an index it deleted. */
+  private forgets = 0;
 
   constructor(private readonly options: ControllerOptions) {}
 
   private nameAccount(did: string) {
-    return linkedAccount(did, this.options.fetch, this.options.resolveTxt);
+    return linkedAccount(did, this.options.fetch);
   }
 
   /** The account the person confirmed, while linked. */
   account(): LinkedAccount | null {
     return this.options.custody.account();
+  }
+
+  /** Whether anything of a link is stored, which Unlink then clears. */
+  stored(): boolean {
+    const { custody } = this.options;
+    return (
+      custody.linked() || custody.seed() !== null || custody.account() !== null
+    );
+  }
+
+  /** No usable link: unlinked, or a link whose key went missing, which only Unlink clears. */
+  private unusable() {
+    this.set(
+      this.options.custody.linked()
+        ? { kind: "stopped", message: KEY_MISSING }
+        : { kind: "unlinked" },
+    );
   }
 
   private set(phase: Phase) {
@@ -158,8 +177,7 @@ export class SyncController {
       const { custody } = this.options;
       const credentials = await custody.credentials.read();
       if (!this.live(generation)) return;
-      if (!custody.seed() || !credentials)
-        return this.set({ kind: "unlinked" });
+      if (!custody.seed() || !credentials) return this.unusable();
       if (custody.account()?.did !== credentials.did) {
         const account = await this.nameAccount(credentials.did);
         if (this.live(generation)) this.set({ kind: "confirm", account });
@@ -278,6 +296,7 @@ export class SyncController {
   private async forget() {
     const { custody, forgetIndexes, forgetDevice } = this.options;
     const seed = custody.seed();
+    this.forgets++;
     this.close();
     custody.wipe();
     try {
@@ -324,7 +343,7 @@ export class SyncController {
     try {
       const credentials = await custody.credentials.read();
       if (!this.live(generation)) return;
-      if (!seed || !credentials) return this.set({ kind: "unlinked" });
+      if (!seed || !credentials) return this.unusable();
       if (custody.account()?.did !== credentials.did) return void this.start();
       this.set({ kind: "opening" });
       await this.released;
@@ -338,14 +357,21 @@ export class SyncController {
       vault = await device.openDeviceVault(seed, this.deviceOptions());
       const checkpoint = await custody.checkpoints.read();
       if (!checkpoint) throw new Error("This vault's pin is missing.");
+      const index = this.options.indexFor({
+        did: credentials.did,
+        vault: checkpoint.vault,
+        deviceId: credentials.deviceId,
+      });
+      const forgets = this.forgets;
       const engine = new SyncEngine({
         local: this.options.local,
         remote: vault,
-        index: this.options.indexFor({
-          did: credentials.did,
-          vault: checkpoint.vault,
-          deviceId: credentials.deviceId,
-        }),
+        // An engine still finishing a write after an unlink or removal saves nothing: its index is gone, and must stay gone.
+        index: {
+          load: () => index.load(),
+          save: (entries) =>
+            forgets === this.forgets ? index.save(entries) : Promise.resolve(),
+        },
         configDir: this.options.configDir,
         confirmDeletions: this.options.confirmDeletions,
         stale: device.stale,

@@ -337,12 +337,14 @@ export class SyncEngine {
       this.dirty = true;
       if (result.failed.length > failures) break;
     }
-    // A stopped engine was closed, unlinked or removed: its index may already be deleted, and must stay so.
-    if (this.dirty && !this.stopped) {
-      this.dirty = false;
-      await this.options.index.save([...this.entries.values()]);
-    }
+    // A stopped engine's round may be older than what a newer one has saved since.
+    if (this.dirty && !this.stopped) await this.saveIndex();
     return result;
+  }
+
+  private async saveIndex() {
+    this.dirty = false;
+    await this.options.index.save([...this.entries.values()]);
   }
 
   /**
@@ -622,6 +624,12 @@ export class SyncEngine {
       this.remoteChanged();
       this.vacating.left("remote", remote.path);
     }
+    // A parked item is saved at once, even if the round stops next: a restart must read the free name as the rename left to finish.
+    if (temporary && remoteTo === temporary) {
+      const entry = this.entries.get(id);
+      if (entry) Object.assign(entry, { path: temporary, moved: path });
+      await this.saveIndex();
+    }
     if (copy) {
       const body = local?.body;
       if (body === undefined) throw new Error("Conflict without local content");
@@ -645,6 +653,7 @@ export class SyncEngine {
       // Recorded now, so a write that fails next still finds the file where it went.
       const entry = this.entries.get(id);
       if (entry) entry.moved = localTo;
+      if (localTo === temporary) await this.saveIndex();
     }
     if (content === "remote" && remote) {
       const body = remote.body ?? (await vault.readAttachment(id));
