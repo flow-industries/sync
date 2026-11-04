@@ -53,14 +53,20 @@ export interface RemoteAttachmentView {
   revision: string;
   digest: string;
 }
+/** `repairLinks: false`: a note's move leaves the links to it as they are written. */
+export interface MoveOptions {
+  repairLinks?: boolean;
+}
 /** `current`: the write is refused unless its base is the stored revision. */
-export interface WriteOptions {
+export interface WriteOptions extends MoveOptions {
   current?: boolean;
 }
 /**
  * The linked NOTE vault, as the device client's `DeviceVault` offers it.
  * Every write the engine makes is compare-and-swap: a save with
- * `{ current: true }`, a rename or remove with the base the plan read.
+ * `{ current: true }`, a rename or remove with the base the plan read. And
+ * every move it makes in NOTE follows one made in Obsidian, which already
+ * updated the links (or was set not to), so it never has NOTE repair them.
  */
 export interface RemoteVault {
   read(): Promise<{ notes: RemoteNoteView[] }>;
@@ -78,7 +84,12 @@ export interface RemoteVault {
     },
     options?: WriteOptions,
   ): Promise<RevisionBase>;
-  rename(id: string, path: string, base?: RevisionBase): Promise<RevisionBase>;
+  rename(
+    id: string,
+    path: string,
+    base?: RevisionBase,
+    options?: MoveOptions,
+  ): Promise<RevisionBase>;
   remove(id: string, base?: RevisionBase): Promise<void>;
 }
 /** Where the entries live between rounds: outside the vault folder, per linked device. */
@@ -133,6 +144,9 @@ const deletionsOf = (steps: readonly Step[]): Deletions => ({
   local: steps.filter((step) => step.kind === "delete-local").length,
   remote: steps.filter((step) => step.kind === "delete-remote").length,
 });
+/** How the engine writes to NOTE: compare-and-swap, and moves that leave links as Obsidian wrote them. */
+const WRITE = { current: true, repairLinks: false } as const;
+const MOVE = { repairLinks: false } as const;
 const baseOf = (item: RemoteItem): RevisionBase | undefined =>
   item.revision && item.digest
     ? { revision: item.revision, digest: item.digest }
@@ -582,13 +596,10 @@ export class SyncEngine {
     const { remote } = this.options;
     const { revision, digest } = base ?? {};
     return typeof body === "string"
-      ? remote.saveNote(
-          { id, path, source: body, revision, digest },
-          { current: true },
-        )
+      ? remote.saveNote({ id, path, source: body, revision, digest }, WRITE)
       : remote.saveAttachment(
           { id, path, bytes: body, revision, digest },
-          { current: true },
+          WRITE,
         );
   }
 
@@ -620,7 +631,7 @@ export class SyncEngine {
         this.vacating.left("remote", remote.path);
       hash = local?.hash ?? "";
     } else if (remote && remote.path !== path) {
-      base = await vault.rename(id, remoteTo, baseOf(remote));
+      base = await vault.rename(id, remoteTo, baseOf(remote), MOVE);
       this.remoteChanged();
       this.vacating.left("remote", remote.path);
     }

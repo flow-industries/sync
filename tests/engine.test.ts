@@ -171,6 +171,20 @@ describe("engine: after the first sync", () => {
     ]);
   });
 
+  test("moves NOTE's copy without repairing links, as Obsidian already updated them", async () => {
+    const w = await synced();
+    await w.local.move("A.md", "Moved/A2.md");
+    w.engine.renamed("A.md", "Moved/A2.md");
+    await settled(w);
+    w.local.put("Moved/A2.md", "one, edited");
+    await w.local.move("Moved/A2.md", "A3.md");
+    w.engine.renamed("Moved/A2.md", "A3.md");
+    w.remote.options = [];
+    await settled(w);
+    expect(remotePaths(w.remote)).toEqual(["A3.md: one, edited", "B.md: two"]);
+    expect(w.remote.options).toEqual([{ current: true, repairLinks: false }]);
+  });
+
   test("carries a folder rename Obsidian reported once", async () => {
     const w = await setup();
     w.local.put("Old/x.md", "x");

@@ -1,6 +1,7 @@
 import type {
   LocalFile,
   LocalVault,
+  MoveOptions,
   RemoteNoteView,
   RemoteVault,
   RevisionBase,
@@ -108,6 +109,8 @@ interface RemoteRow extends RevisionBase {
 export class MemoryRemote implements RemoteVault {
   items = new Map<string, RemoteRow>();
   removed: string[] = [];
+  /** Each save's and rename's options, so a test can tell which moves asked NOTE to repair links. */
+  options: (WriteOptions | MoveOptions | undefined)[] = [];
   beforeWrite?: (id: string) => void;
   private revisions = 0;
   private history = new Map<string, Set<string>>();
@@ -144,6 +147,7 @@ export class MemoryRemote implements RemoteVault {
     base: Partial<RevisionBase>,
     options: WriteOptions = {},
   ) {
+    this.options.push(options);
     this.beforeWrite?.(row.id);
     this.check(row.id, base, options.current);
     if (this.collides(row.id, row.path))
@@ -214,7 +218,13 @@ export class MemoryRemote implements RemoteVault {
       options,
     );
   }
-  async rename(id: string, path: string, base?: RevisionBase) {
+  async rename(
+    id: string,
+    path: string,
+    base?: RevisionBase,
+    options?: MoveOptions,
+  ) {
+    this.options.push(options);
     this.beforeWrite?.(id);
     const current = this.items.get(id);
     if (!current) throw new Error("Missing note");

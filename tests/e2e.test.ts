@@ -347,8 +347,8 @@ describe("two Obsidian vaults synced through NOTE", () => {
 /**
  * With "Automatically update internal links" on, Obsidian rewrites a third
  * note's links for the new names, and the plugin pushes that edit before the
- * renames. NOTE's rename then repairs the links it saw resolve to the moving
- * note, which a single rename leaves right, but a chain or a swap re-targets.
+ * renames. Those renames skip NOTE's link repair: repairing again would
+ * re-target the links in a chain or a swap.
  */
 describe("links in a third note across renames, with Obsidian's link updates on", () => {
   async function linkedWithIndex() {
@@ -389,8 +389,7 @@ describe("links in a third note across renames, with Obsidian's link updates on"
     expect(vault.local.text("Index.md")).toBe("first [[Zeta]] then [[Beta]]");
   }, 60_000);
 
-  // Pending a device-client option to skip link repair on renames Obsidian already repaired.
-  test.failing("a chain keeps them on the right notes", async () => {
+  test("a chain keeps them on the right notes", async () => {
     const vault = await linkedWithIndex();
     await rename(
       vault,
@@ -405,8 +404,7 @@ describe("links in a third note across renames, with Obsidian's link updates on"
     expect(vault.local.text("Index.md")).toBe("first [[Beta]] then [[Gamma]]");
   }, 60_000);
 
-  // Pending the same option.
-  test.failing("a swap keeps them on the right notes", async () => {
+  test("a swap keeps them on the right notes", async () => {
     const vault = await linkedWithIndex();
     await rename(vault, "Alpha.md", "tmp.md", "first [[tmp]] then [[Beta]]");
     await rename(vault, "Beta.md", "Alpha.md", "first [[tmp]] then [[Alpha]]");

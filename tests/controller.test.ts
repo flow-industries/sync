@@ -59,7 +59,7 @@ function deviceVault(
     readAttachment: (id) => remote.readAttachment(id),
     saveAttachment: (attachment, options) =>
       remote.saveAttachment(attachment, options),
-    rename: (id, path, base) => remote.rename(id, path, base),
+    rename: (id, path, base, options) => remote.rename(id, path, base, options),
     remove: (id, base) => remote.remove(id, base),
     compose: async () => ({ selectedId: "" }),
     sync: async () => {
@@ -358,7 +358,7 @@ function deviceOver(
     readAttachment: (id) => remote.readAttachment(id),
     saveAttachment: (attachment, options) =>
       remote.saveAttachment(attachment, options),
-    rename: (id, path, base) => remote.rename(id, path, base),
+    rename: (id, path, base, options) => remote.rename(id, path, base, options),
     remove: (id, base) => remote.remove(id, base),
     compose: async () => ({ selectedId: "" }),
     sync: async () => {
