@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
   type Entry,
-  type LocalNote,
+  type LocalItem,
   plan,
-  type RemoteNote,
+  type RemoteItem,
   type Step,
 } from "../src/plan";
 
@@ -22,16 +22,16 @@ const entry = (
   size: 1,
   ...extra,
 });
-const local = (path: string, hash: string): LocalNote => ({
+const local = (path: string, hash: string): LocalItem => ({
   path,
   hash,
-  source: `text ${hash}`,
+  body: `text ${hash}`,
 });
-const remote = (id: string, path: string, hash: string): RemoteNote => ({
+const remote = (id: string, path: string, hash: string): RemoteItem => ({
   id,
   path,
   hash,
-  source: `text ${hash}`,
+  body: `text ${hash}`,
   revision: `rev-${hash}`,
   digest: `digest-${hash}`,
 });

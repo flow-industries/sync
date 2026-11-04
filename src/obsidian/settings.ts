@@ -138,11 +138,8 @@ export class NoteSyncSettingTab extends PluginSettingTab {
       ...round.failed
         .slice(0, 5)
         .map(({ path, error }) => `${path || "Sync"}: ${error}`),
-      round.attachments
-        ? `${round.attachments} attachments stay on this device: this version syncs Markdown and MDX notes only.`
-        : "",
       round.unsyncable.length
-        ? `Not synced, because one side can't store the name: ${round.unsyncable.slice(0, 5).join(", ")}${round.unsyncable.length > 5 ? "…" : ""}`
+        ? `Not synced (a name one side can't store, a name that differs only in case, or an attachment over 32 MB): ${round.unsyncable.slice(0, 5).join(", ")}${round.unsyncable.length > 5 ? "…" : ""}`
         : "",
       round.held.local || round.held.remote
         ? `Held back: ${round.held.local} deletions here and ${round.held.remote} in NOTE. Sync now to review them.`

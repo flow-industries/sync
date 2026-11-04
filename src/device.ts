@@ -8,6 +8,7 @@ export {
   type DeviceCheckpointStore,
   type DeviceOptions,
   type DeviceVault,
+  deleteDeviceStorage,
   LINK_EXPIRED,
   LINK_UNVERIFIED,
   type LinkOptions,

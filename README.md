@@ -15,16 +15,15 @@ A link has to be approved within ten minutes.
 
 ## What syncs
 
-- **Notes:** every Markdown (`.md`) and MDX (`.mdx`) file, both ways.
-- **Renames** carry across, including folder renames. A rename the plugin didn't see (Obsidian was closed) is recognised by the note's unchanged text.
-- **Deletions** move the note to the trash on the other side: Obsidian's trash here, NOTE's trash there. An edit beats a deletion: if one side edited a note the other deleted, the note comes back. Before a sync would trash more than ten notes and more than a tenth of the vault at once, the plugin asks.
-- **Conflicts:** when both sides edited the same note, NOTE's text keeps the note's name and this vault's text is saved beside it as `<name> conflict <8 hex>.md`, the way NOTE names its own conflict copies. Nothing is overwritten while you type: a file that changes during a sync is left alone until the next one.
+- **Notes and attachments:** every Markdown (`.md`) and MDX (`.mdx`) note, and every other file (images, PDFs, audio and the rest) up to 32 MB, both ways.
+- **Renames** carry across, including folder renames. A rename the plugin didn't see (Obsidian was closed) is recognised by the file's unchanged content. When you rename an attachment here, Obsidian updates the links to it, and those edits sync like any other.
+- **Deletions** move the file to the trash on the other side: Obsidian's trash here, NOTE's trash there. An edit beats a deletion: if one side edited a file the other deleted, it comes back. Before a sync would trash more than ten files and more than a tenth of the vault at once, the plugin asks.
+- **Conflicts:** when both sides changed the same file, NOTE's version keeps the name and this vault's is saved beside it. A note's copy is named `<name> conflict <8 hex>.md`, the way NOTE names its own conflict copies; an attachment's keeps its extension last, `<name> conflict <8 hex>.png`, so Obsidian still opens it. Nothing is overwritten while you type: a file that changes during a sync, or an open note with unsaved typing, is left alone until the next sync.
 
 **Not synced:**
 
 - Obsidian's config folder (`.obsidian/`) and anything hidden. The config folder holds plugin code, so nothing from NOTE is ever written into it.
-- Attachments. This version syncs notes only; images, PDFs and other files stay on this device, and **Settings → NOTE Sync** counts them.
-- Names NOTE can't store (such as `con.md` or a name ending in a dot), and NOTE notes whose names this vault can't hold. Settings lists them.
+- Attachments over 32 MB, names NOTE can't store (such as `con.md` or a name ending in a dot), names that differ from a synced file's only in case, and NOTE files whose names this vault can't hold. Settings lists them. A synced file that becomes one of these is left as it is on both sides, never deleted.
 
 ## Note content never runs
 
@@ -49,12 +48,12 @@ Trade-offs to know:
 - **Mobile secret storage is shared by every vault on the device**, so each vault's link lives under its own random name.
 - **On mobile, Obsidian saves a secret in the background.** Flow ID rotates the refresh token on every refresh; if the app is killed in the instant between a refresh and that save, the next start presents the old token, Flow ID refuses it, and you link again. Nothing is lost: your notes are on both sides.
 
-The plugin also keeps two caches in Obsidian's app data, never in the vault: the device client's encrypted local database, and an index of what was last synced.
+The plugin also keeps two caches in Obsidian's app data, never in the vault: the device client's encrypted local database, named for this device alone, and an index of what was last synced.
 
 ## Removing access
 
-- **Unlink** (in settings or the command palette) stops syncing and forgets the device seed and tokens on this device. Your files stay. Remove the device under **Access** in NOTE too.
-- **Removing the device** under Access in NOTE, or Flow ID revoking it, stops the plugin at its next sync: it wipes the seed and tokens, writes nothing more, and asks you to link again. Your files stay.
+- **Unlink** (in settings or the command palette) stops syncing and forgets the device seed, its tokens, its local database and the sync index on this device. Your files stay. Remove the device under **Access** in NOTE too.
+- **Removing the device** under Access in NOTE, or Flow ID revoking it, stops the plugin at its next sync: it wipes the same, writes nothing more, and asks you to link again. Your files stay.
 
 ## Network use
 

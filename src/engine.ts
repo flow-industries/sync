@@ -1,10 +1,11 @@
 import { sha256 } from "./hash";
 import { exclusion, isNotePath, pathKey } from "./paths";
 import {
+  type Body,
   type Entry,
-  type LocalNote,
+  type LocalItem,
   plan,
-  type RemoteNote,
+  type RemoteItem,
   type Step,
 } from "./plan";
 
@@ -14,22 +15,29 @@ export interface LocalFile {
   size: number;
 }
 /**
- * The Obsidian vault as sync sees it. Every write is conditional, so an edit
- * the person makes while a round runs is never overwritten: the write
+ * The Obsidian vault as sync sees it. Writes over text are conditional, so an
+ * edit the person makes while a round runs is never overwritten: the write
  * reports false and the next round picks the edit up.
  */
 export interface LocalVault {
   /** Every file Obsidian knows of; its config folder and hidden files aren't among them. */
   list(): Promise<LocalFile[]>;
   read(path: string): Promise<string>;
+  readBinary(path: string): Promise<Uint8Array>;
   /** Creates the file and any missing folders; false when something is already there. */
-  create(path: string, source: string): Promise<boolean>;
+  create(path: string, body: Body): Promise<boolean>;
   /** Replaces the text only if it is still exactly `expected`. */
   replace(path: string, expected: string, next: string): Promise<boolean>;
+  /** Replaces an attachment's bytes, which the caller checked just before. */
+  overwrite(path: string, bytes: Uint8Array): Promise<void>;
   /** Renames without rewriting links elsewhere; false when `to` is taken or `from` is gone. */
   move(from: string, to: string): Promise<boolean>;
   /** Moves the file to the trash Obsidian is set to use. */
   trash(path: string): Promise<void>;
+}
+export interface RevisionBase {
+  revision: string;
+  digest: string;
 }
 export interface RemoteNoteView {
   id: string;
@@ -38,12 +46,27 @@ export interface RemoteNoteView {
   revision?: string;
   digest?: string;
 }
+export interface RemoteAttachmentView {
+  id: string;
+  path: string;
+  revision: string;
+  digest: string;
+}
 /** The linked NOTE vault, as the device client's `DeviceVault` offers it. */
 export interface RemoteVault {
   read(): Promise<{ notes: RemoteNoteView[] }>;
-  /** Resolves with the revision the saved text now has. */
-  saveNote(note: RemoteNoteView): Promise<{ revision: string; digest: string }>;
-  rename(id: string, path: string): Promise<void>;
+  listAttachments(): Promise<RemoteAttachmentView[]>;
+  readAttachment(id: string): Promise<Uint8Array>;
+  /** Each save resolves with the revision the content now has. */
+  saveNote(note: RemoteNoteView): Promise<RevisionBase>;
+  saveAttachment(attachment: {
+    id: string;
+    path: string;
+    bytes: Uint8Array;
+    revision?: string;
+    digest?: string;
+  }): Promise<RevisionBase>;
+  rename(id: string, path: string): Promise<RevisionBase>;
   remove(id: string): Promise<void>;
 }
 /** Where the entries live between rounds: outside the vault folder, per linked device. */
@@ -59,9 +82,12 @@ export interface Deletions {
 export interface RoundResult {
   applied: number;
   failed: { path: string; error: string }[];
-  /** Attachments, which this version doesn't sync yet. */
-  attachments: number;
-  /** Notes whose names NOTE can't store, or notes in NOTE whose names this vault can't hold. */
+  /**
+   * Files left out: names NOTE can't store, names that differ only in case,
+   * attachments over `MAX_ATTACHMENT_BYTES`, and NOTE items under names this
+   * vault can't hold. A synced item that becomes one of these is left alone
+   * on both sides, never deleted.
+   */
   unsyncable: string[];
   /** Deletions waiting for the person to confirm them. */
   held: Deletions;
@@ -79,8 +105,10 @@ export interface EngineOptions {
   newId?(): string;
 }
 
-/** More deletions than this, and more than a tenth of the synced notes, need confirming. */
+/** More deletions than this, and more than a tenth of the synced items, need confirming. */
 const MASS_DELETION = 10;
+/** NOTE imports files up to this size; a larger attachment stays on this device. */
+export const MAX_ATTACHMENT_BYTES = 32_000_000;
 const MAX_PASSES = 3;
 
 const deletionsOf = (steps: readonly Step[]): Deletions => ({
@@ -99,7 +127,7 @@ const isDeletion = (step: Step) =>
 export class SyncEngine {
   private entries = new Map<string, Entry>();
   private remoteHashes = new Map<string, { revision: string; hash: string }>();
-  private cached: RemoteNote[] | null = null;
+  private cached: RemoteItem[] | null = null;
   private running: Promise<RoundResult> | null = null;
   private again = false;
   private declined = new Set<string>();
@@ -193,18 +221,26 @@ export class SyncEngine {
     const result: RoundResult = {
       applied: 0,
       failed: [],
-      attachments: 0,
       unsyncable: [],
       held: { local: 0, remote: 0 },
     };
     for (let pass = 0; pass < MAX_PASSES && !this.stopped; pass++) {
       result.unsyncable = [];
-      const remote = await this.readRemote(result);
-      const local = await this.scanLocal(result);
+      const frozen = new Set<string>();
+      const remote = await this.readRemote(result, frozen);
+      const local = await this.scanLocal(result, frozen);
+      const frozenPaths = new Set(
+        [...frozen].flatMap((id) => {
+          const entry = this.entries.get(id);
+          return entry ? [pathKey(entry.moved ?? entry.path)] : [];
+        }),
+      );
       const planned = plan({
-        entries: [...this.entries.values()],
-        local,
-        remote,
+        entries: [...this.entries.values()].filter(
+          (entry) => !frozen.has(entry.id),
+        ),
+        local: local.filter((item) => !frozenPaths.has(pathKey(item.path))),
+        remote: remote.filter((item) => !frozen.has(item.id)),
         newId: this.newId,
       });
       const steps = await this.confirmed(planned, result);
@@ -264,54 +300,95 @@ export class SyncEngine {
     return steps.filter((step) => !held.has(step));
   }
 
-  private async readRemote(result: RoundResult): Promise<RemoteNote[]> {
+  /**
+   * Both kinds of NOTE item, each with the hash of its content: a note's from
+   * its text, an attachment's from the index when its revision is the one
+   * synced, otherwise from its bytes, read once per revision.
+   */
+  private async readRemote(
+    result: RoundResult,
+    frozen: Set<string>,
+  ): Promise<RemoteItem[]> {
     if (!this.cached) {
-      const { notes } = await this.options.remote.read();
-      const hashed: RemoteNote[] = [];
-      for (const note of notes) {
-        const revision = note.revision ?? "";
-        const known = this.remoteHashes.get(note.id);
-        const hash =
-          known && known.revision === revision && revision
-            ? known.hash
-            : await sha256(note.source);
-        this.remoteHashes.set(note.id, { revision, hash });
-        hashed.push({ ...note, hash });
-      }
-      this.cached = hashed;
+      const { remote } = this.options;
+      const [{ notes }, attachments] = await Promise.all([
+        remote.read(),
+        remote.listAttachments(),
+      ]);
+      const items: RemoteItem[] = [];
+      for (const note of notes)
+        items.push({
+          id: note.id,
+          path: note.path,
+          revision: note.revision,
+          digest: note.digest,
+          body: note.source,
+          hash: await this.remoteHash(
+            note.id,
+            note.revision,
+            () => note.source,
+          ),
+        });
+      for (const attachment of attachments)
+        items.push({
+          ...attachment,
+          hash: await this.remoteHash(attachment.id, attachment.revision, () =>
+            remote.readAttachment(attachment.id),
+          ),
+        });
+      this.cached = items;
     }
-    return this.cached.filter((note) => {
-      if (!exclusion(note.path, this.options.configDir)) return true;
-      result.unsyncable.push(note.path);
+    return this.cached.filter((item) => {
+      if (!exclusion(item.path, this.options.configDir)) return true;
+      result.unsyncable.push(item.path);
+      if (this.entries.has(item.id)) frozen.add(item.id);
       return false;
     });
   }
 
-  private async scanLocal(result: RoundResult): Promise<LocalNote[]> {
+  private async remoteHash(
+    id: string,
+    revision: string | undefined,
+    body: () => Body | Promise<Body>,
+  ): Promise<string> {
+    const synced = this.entries.get(id);
+    if (revision && synced?.revision === revision && synced.hash)
+      return synced.hash;
+    const known = this.remoteHashes.get(id);
+    if (revision && known?.revision === revision) return known.hash;
+    const hash = await sha256(await body());
+    this.remoteHashes.set(id, { revision: revision ?? "", hash });
+    return hash;
+  }
+
+  private async scanLocal(
+    result: RoundResult,
+    frozen: Set<string>,
+  ): Promise<LocalItem[]> {
     const byPath = new Map(
       [...this.entries.values()].map((entry) => [
         pathKey(entry.moved ?? entry.path),
         entry,
       ]),
     );
-    result.attachments = 0;
     const files = new Map<string, LocalFile[]>();
     for (const file of await this.options.local.list()) {
-      if (exclusion(file.path, this.options.configDir)) {
-        if (isNotePath(file.path)) result.unsyncable.push(file.path);
-        continue;
-      }
-      if (!isNotePath(file.path)) {
-        result.attachments++;
-        continue;
-      }
       const key = pathKey(file.path);
+      if (
+        exclusion(file.path, this.options.configDir) ||
+        (!isNotePath(file.path) && file.size > MAX_ATTACHMENT_BYTES)
+      ) {
+        result.unsyncable.push(file.path);
+        const entry = byPath.get(key);
+        if (entry) frozen.add(entry.id);
+        continue;
+      }
       files.set(key, [...(files.get(key) ?? []), file]);
     }
-    const notes: LocalNote[] = [];
+    const items: LocalItem[] = [];
     for (const [key, group] of files) {
       const entry = byPath.get(key);
-      // Names that differ only in case are one note to NOTE: only the synced one syncs.
+      // Names that differ only in case are one item to NOTE: only the synced one syncs.
       const file =
         group.length === 1
           ? group[0]
@@ -322,20 +399,26 @@ export class SyncEngine {
         if (other !== file) result.unsyncable.push(other.path);
       if (!file) continue;
       if (entry && entry.mtime === file.mtime && entry.size === file.size) {
-        notes.push({ path: file.path, hash: entry.hash });
+        items.push({ path: file.path, hash: entry.hash });
         continue;
       }
-      const source = await this.options.local.read(file.path);
-      const hash = await sha256(source);
+      const body = await this.readLocal(file.path);
+      const hash = await sha256(body);
       // The listing's stat predates the read, so a later edit still shows as a new stat.
       if (entry?.hash === hash) {
         entry.mtime = file.mtime;
         entry.size = file.size;
         this.dirty = true;
       }
-      notes.push({ path: file.path, hash, source });
+      items.push({ path: file.path, hash, body });
     }
-    return notes;
+    return items;
+  }
+
+  private readLocal(path: string): Promise<Body> {
+    return isNotePath(path)
+      ? this.options.local.read(path)
+      : this.options.local.readBinary(path);
   }
 
   private async apply(step: Step, result: RoundResult) {
@@ -366,25 +449,41 @@ export class SyncEngine {
     }
   }
 
-  /** The local file still holds what the plan saw: its text, or the hash of text it didn't need to read. */
-  private async unchanged(local: LocalNote): Promise<string | null> {
-    const current = await this.options.local.read(local.path);
+  /** The local file's content, if it still is what the plan saw; null once it changed. */
+  private async unchanged(local: LocalItem): Promise<Body | null> {
+    const current = await this.readLocal(local.path);
     return (await sha256(current)) === local.hash ? current : null;
+  }
+
+  private save(
+    id: string,
+    path: string,
+    body: Body,
+    base?: Partial<RevisionBase>,
+  ) {
+    const { remote } = this.options;
+    const revision = base?.revision;
+    const digest = base?.digest;
+    return typeof body === "string"
+      ? remote.saveNote({ id, path, source: body, revision, digest })
+      : remote.saveAttachment({ id, path, bytes: body, revision, digest });
   }
 
   private async update(step: Extract<Step, { kind: "update" }>) {
     const { id, path, content, local, remote, copy } = step;
     const { local: files, remote: vault } = this.options;
-    let revision = remote?.revision ?? "";
-    let digest = remote?.digest ?? "";
+    let base: RevisionBase = {
+      revision: remote?.revision ?? "",
+      digest: remote?.digest ?? "",
+    };
     let hash = remote?.hash ?? local?.hash ?? "";
     if (copy) {
-      const source = local?.source;
-      if (source === undefined) throw new Error("Conflict without local text");
-      if (!(await files.create(copy, source)))
+      const body = local?.body;
+      if (body === undefined) throw new Error("Conflict without local content");
+      if (!(await files.create(copy, body)))
         throw new Error(`${copy} already exists`);
       const copyId = this.newId();
-      const saved = await vault.saveNote({ id: copyId, path: copy, source });
+      const saved = await this.save(copyId, copy, body);
       this.remoteChanged();
       this.record({
         id: copyId,
@@ -394,19 +493,13 @@ export class SyncEngine {
       });
     }
     if (content === "local") {
-      const source = local?.source;
-      if (source === undefined) throw new Error("Push without local text");
-      ({ revision, digest } = await vault.saveNote({
-        id,
-        path,
-        source,
-        revision: remote?.revision,
-        digest: remote?.digest,
-      }));
+      const body = local?.body;
+      if (body === undefined) throw new Error("Push without local content");
+      base = await this.save(id, path, body, remote);
       this.remoteChanged();
       hash = local?.hash ?? "";
     } else if (remote && remote.path !== path) {
-      await vault.rename(id, path);
+      base = await vault.rename(id, path);
       this.remoteChanged();
     }
     if (this.stopped) throw new Error("Sync stopped");
@@ -418,17 +511,23 @@ export class SyncEngine {
       if (entry) entry.moved = path;
     }
     if (content === "remote" && remote) {
+      const body = remote.body ?? (await vault.readAttachment(id));
       const written = local
-        ? await this.replaceAt(path, local, remote.source)
-        : await files.create(path, remote.source);
+        ? await this.replaceAt(path, local, body)
+        : await files.create(path, body);
       if (!written) throw new Error(`${path} changed while syncing`);
     }
-    this.record({ id, path, hash, revision, digest });
+    this.record({ id, path, hash, ...base });
   }
 
-  private async replaceAt(path: string, local: LocalNote, next: string) {
+  private async replaceAt(path: string, local: LocalItem, next: Body) {
     const current = await this.unchanged({ ...local, path });
     if (current === null) return false;
+    if (typeof current !== "string" || typeof next !== "string") {
+      if (this.stopped) return false;
+      await this.options.local.overwrite(path, next as Uint8Array);
+      return true;
+    }
     return current === next || this.options.local.replace(path, current, next);
   }
 

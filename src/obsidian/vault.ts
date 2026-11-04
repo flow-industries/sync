@@ -3,6 +3,12 @@ import type { SecretBackend } from "../custody";
 import type { LocalVault } from "../engine";
 import { parentOf, pathKey } from "../paths";
 
+const arrayBufferOf = (bytes: Uint8Array) =>
+  bytes.buffer.slice(
+    bytes.byteOffset,
+    bytes.byteOffset + bytes.byteLength,
+  ) as ArrayBuffer;
+
 /** The Obsidian vault through its Vault API; renames never rewrite links, since NOTE already repaired them. */
 export function obsidianVault(app: App): LocalVault {
   const { vault, fileManager } = app;
@@ -37,12 +43,23 @@ export function obsidianVault(app: App): LocalVault {
       if (!file) throw new Error(`${path} is gone`);
       return vault.read(file);
     },
-    async create(path, source) {
+    async readBinary(path) {
+      const file = fileAt(path);
+      if (!file) throw new Error(`${path} is gone`);
+      return new Uint8Array(await vault.readBinary(file));
+    },
+    async create(path, body) {
       const target = normalizePath(path);
       if (!(await free(target))) return false;
       await ensureFolder(target);
-      await vault.create(target, source);
+      if (typeof body === "string") await vault.create(target, body);
+      else await vault.createBinary(target, arrayBufferOf(body));
       return true;
+    },
+    async overwrite(path, bytes) {
+      const file = fileAt(path);
+      if (!file) throw new Error(`${path} is gone`);
+      await vault.modifyBinary(file, arrayBufferOf(bytes));
     },
     async replace(path, expected, next) {
       const file = fileAt(path);

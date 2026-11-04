@@ -3,6 +3,7 @@ import { SyncController } from "./controller";
 import { Custody } from "./custody";
 import {
   createDeviceSeed,
+  deleteDeviceStorage,
   linkDevice,
   openDeviceVault,
   pulledStatus,
@@ -10,7 +11,7 @@ import {
   type TrustLoss,
 } from "./device";
 import { requestUrlFetch } from "./fetch";
-import { forgetVaultDatabases, IndexedDbIndex } from "./index-store";
+import { IndexedDbIndex } from "./index-store";
 import { holdLock } from "./lock";
 import { confirm, LinkModal } from "./obsidian/modals";
 import { NoteSyncSettingTab, statusText } from "./obsidian/settings";
@@ -49,13 +50,13 @@ export default class NoteSyncPlugin extends Plugin {
       configDir: this.app.vault.configDir,
       indexFor: (did, vault) =>
         new IndexedDbIndex(`flow-note-sync:${namespace}:${did}:${vault}`),
-      hold: holdLock,
-      forgetLocalDatabase: (did, vault) => forgetVaultDatabases(did, vault),
+      hold: () => holdLock(`flow-note:${namespace}`),
+      forgetDevice: deleteDeviceStorage,
       confirmDeletions: ({ local, remote }) =>
         confirm(
           this.app,
-          "Delete these notes?",
-          `This sync would move ${local} notes here and ${remote} notes in NOTE to the trash. That can mean they were deleted on purpose, or that one side looks empty when it isn't. Nothing is deleted unless you confirm.`,
+          "Delete these files?",
+          `This sync would move ${local} files here and ${remote} in NOTE to the trash. That can mean they were deleted on purpose, or that one side looks empty when it isn't. Nothing is deleted unless you confirm.`,
           "Move to trash",
           { warning: true },
         ),

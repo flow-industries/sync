@@ -41,6 +41,14 @@ function deviceVault(remote: MemoryRemote, stranded = false) {
   const vault = {
     read: () => remote.read().then((view) => ({ ...view, folders: [] })),
     saveNote: (note) => remote.saveNote(note),
+    listAttachments: async () =>
+      (await remote.listAttachments()).map((item) => ({
+        ...item,
+        mime: "application/octet-stream",
+        size: 0,
+      })),
+    readAttachment: (id) => remote.readAttachment(id),
+    saveAttachment: (attachment) => remote.saveAttachment(attachment),
     rename: (id, path) => remote.rename(id, path),
     remove: (id) => remote.remove(id),
     compose: async () => ({ selectedId: "" }),
@@ -102,8 +110,8 @@ async function harness(
     configDir: ".obsidian",
     indexFor: () => index,
     hold: async () => (options.held ? null : () => {}),
-    forgetLocalDatabase: async (owner, vault) => {
-      forgotten.push(`${owner}:${vault}`);
+    forgetDevice: async (seed) => {
+      forgotten.push(`seed ${seed[0]}`);
     },
     confirmDeletions: async () => true,
     onChange: () => {},
@@ -131,10 +139,10 @@ describe("controller", () => {
     h.local.put("Here.md", "local");
     await h.controller.start();
     await h.controller.syncNow();
-    expect(h.remote.notes.size).toBe(0);
+    expect(h.remote.items.size).toBe(0);
     h.device.state.pull = true;
     await h.controller.syncNow();
-    expect(h.remote.byPath("Here.md")?.source).toBe("local");
+    expect(h.remote.text("Here.md")).toBe("local");
     h.controller.close();
   });
 
@@ -144,7 +152,7 @@ describe("controller", () => {
     await h.controller.start();
     expect(h.controller.phase.kind).toBe("confirm");
     await h.controller.syncNow();
-    expect(h.remote.notes.size).toBe(0);
+    expect(h.remote.items.size).toBe(0);
   });
 
   test("a vault closed or unlinked while it opens never opens", async () => {
@@ -161,7 +169,7 @@ describe("controller", () => {
       await Bun.sleep(5);
       expect(h.controller.phase.kind).not.toBe("open");
       expect(h.device.state.stopped).toBe(true);
-      expect(h.remote.notes.size).toBe(0);
+      expect(h.remote.items.size).toBe(0);
       if (interrupt === "unlink") {
         expect(h.controller.phase.kind).toBe("unlinked");
         expect(h.custody.seed()).toBeNull();
@@ -177,19 +185,17 @@ describe("controller", () => {
     expect(h.controller.phase.kind).toBe("linking");
   });
 
-  test("another vault syncing the same account stops this one, and keeps its database on unlink", async () => {
+  test("a second window of the same vault doesn't open a second transport", async () => {
     const h = await harness({ held: true });
     await h.controller.start();
     expect(h.controller.phase).toEqual({
       kind: "stopped",
       message: LOCKED_ELSEWHERE,
     });
-    await h.controller.unlink();
-    expect(h.forgotten).toEqual([]);
-    expect(h.custody.seed()).toBeNull();
+    expect(h.device.state.stopped).toBe(false);
   });
 
-  test("unlinking forgets the device's database and the sync index", async () => {
+  test("unlinking forgets the device's databases, by its seed, and the sync index", async () => {
     const h = await harness();
     await h.controller.start();
     await h.controller.syncNow();
@@ -205,7 +211,7 @@ describe("controller", () => {
       },
     ];
     await h.controller.unlink();
-    expect(h.forgotten).toEqual([`${did}:vault`]);
+    expect(h.forgotten).toEqual(["seed 1"]);
     expect(h.index.entries).toEqual([]);
     expect(h.secrets.values.has("flow-note-0123456789abcdef-tokens")).toBe(
       false,

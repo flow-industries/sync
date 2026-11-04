@@ -50,7 +50,7 @@ export const REMOVED: Record<RemovalReason, string> = {
 export const STRANDED =
   "NOTE's key changed while edits from this vault were still waiting to sync. Nothing is overwritten this time: where NOTE has different text, this vault's is kept as a conflict copy beside it.";
 export const LOCKED_ELSEWHERE =
-  "Another Obsidian vault on this device is syncing this NOTE account. Close it or unlink it there first.";
+  "This vault is already syncing in another Obsidian window.";
 
 export interface ControllerOptions {
   custody: Custody;
@@ -63,12 +63,13 @@ export interface ControllerOptions {
   /** The index for one NOTE vault, so relinking to another vault never reuses it. */
   indexFor(did: string, vault: string): SyncIndex;
   /**
-   * Holds `name` for as long as the vault is open, across every window and
-   * vault of this app, or answers null when another holder has it.
+   * Holds this vault's credential store for as long as the vault is open,
+   * across every window of this app, or answers null when another holder has
+   * it, so only one device transport ever refreshes its tokens.
    */
-  hold(name: string): Promise<(() => void) | null>;
-  /** Deletes the device client's local database for this account's vault. */
-  forgetLocalDatabase(did: string, vault: string): Promise<void>;
+  hold(): Promise<(() => void) | null>;
+  /** Deletes the device client's local databases for this seed, unsynced edits included. */
+  forgetDevice(seed: Uint8Array): Promise<void>;
   confirmDeletions(deletions: Deletions): Promise<boolean>;
   onChange(): void;
   onTrustLoss(loss: TrustLoss): void;
@@ -229,30 +230,25 @@ export class SyncController {
   }
 
   /**
-   * Wipes the keys and drops the sync index, whose base the device's database
-   * no longer backs. The database goes too, unless another vault on this
-   * device holds the account: the device client names it by account and
-   * vault only, so it is that vault's database as well.
+   * Wipes the keys, the device's local databases and the sync index, whose
+   * base those databases no longer back. Unsynced edits in them are dropped;
+   * the files here still hold them.
    */
   private async forget() {
-    const { custody, hold, indexFor, forgetLocalDatabase } = this.options;
+    const { custody, indexFor, forgetDevice } = this.options;
     const credentials = await custody.credentials.read();
     const checkpoint = await custody.checkpoints.read();
+    const seed = custody.seed();
     this.close();
     custody.wipe();
-    if (!credentials || !checkpoint) return;
-    const { did } = credentials;
-    await indexFor(did, checkpoint.vault)
-      .clear()
-      .catch(() => {});
-    const release = await hold(`flow-note:${did}`);
-    if (!release) return;
     try {
-      await forgetLocalDatabase(did, checkpoint.vault);
-    } catch {
-      // A database another window still holds open is left for the next unlink.
+      if (credentials && checkpoint)
+        await indexFor(credentials.did, checkpoint.vault)
+          .clear()
+          .catch(() => {});
+      if (seed) await forgetDevice(seed).catch(() => {});
     } finally {
-      release();
+      seed?.fill(0);
     }
   }
 
@@ -288,7 +284,7 @@ export class SyncController {
       if (!seed || !credentials) return this.set({ kind: "unlinked" });
       if (custody.account()?.did !== credentials.did) return void this.start();
       this.set({ kind: "opening" });
-      const release = await this.options.hold(`flow-note:${credentials.did}`);
+      const release = await this.options.hold();
       if (!this.live(generation)) return release?.();
       if (!release)
         return this.set({ kind: "stopped", message: LOCKED_ELSEWHERE });
@@ -367,7 +363,6 @@ export class SyncController {
       this.lastRound = {
         applied: 0,
         failed: [{ path: "", error: messageOf(error) }],
-        attachments: 0,
         unsyncable: [],
         held: { local: 0, remote: 0 },
       };

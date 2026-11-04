@@ -1,7 +1,7 @@
 import { conflictPath } from "./conflicts";
-import { pathKey } from "./paths";
+import { isNotePath, pathKey } from "./paths";
 
-/** What both sides agreed a note was at the last sync. */
+/** What both sides agreed a note or attachment was at the last sync. */
 export interface Entry {
   id: string;
   path: string;
@@ -10,31 +10,34 @@ export interface Entry {
   /** The remote revision synced; empty until a read or a save names it. */
   revision: string;
   digest: string;
-  /** SHA-256 of the source synced. */
+  /** SHA-256 of the text or bytes synced. */
   hash: string;
   /** The local file's stat at the last sync, so an unchanged file isn't read again. */
   mtime: number;
   size: number;
 }
-/** A note file in the Obsidian vault; `source` is read whenever it may have changed. */
-export interface LocalNote {
+/** A note's text or an attachment's bytes. */
+export type Body = string | Uint8Array;
+/** A file in the Obsidian vault; `body` is read whenever it may have changed. */
+export interface LocalItem {
   path: string;
   hash: string;
-  source?: string;
+  body?: Body;
 }
-export interface RemoteNote {
+/** A note or attachment in NOTE; an attachment's bytes are read only when a step needs them. */
+export interface RemoteItem {
   id: string;
   path: string;
-  source: string;
+  hash: string;
   revision?: string;
   digest?: string;
-  hash: string;
+  body?: Body;
 }
 
 /**
- * One note's change. An update writes `content`'s side over the other at
+ * One item's change. An update writes `content`'s side over the other at
  * `path` (`same`: only paths or the index change), and `copy` keeps the
- * local text as a new note beside it when both sides edited it.
+ * local version as a new item beside it when both sides changed it.
  */
 export type Step =
   | {
@@ -42,18 +45,18 @@ export type Step =
       id: string;
       path: string;
       content: "local" | "remote" | "same";
-      local?: LocalNote;
-      remote?: RemoteNote;
+      local?: LocalItem;
+      remote?: RemoteItem;
       copy?: string;
     }
-  | { kind: "delete-local"; id: string; local: LocalNote }
+  | { kind: "delete-local"; id: string; local: LocalItem }
   | { kind: "delete-remote"; id: string }
   | { kind: "forget"; id: string };
 
 export interface PlanInput {
   entries: readonly Entry[];
-  local: readonly LocalNote[];
-  remote: readonly RemoteNote[];
+  local: readonly LocalItem[];
+  remote: readonly RemoteItem[];
   newId?: () => string;
 }
 
@@ -70,17 +73,22 @@ const samePath = (a: string, b: string) =>
  */
 function claimLocal(
   entries: readonly Entry[],
-  local: Map<string, LocalNote>,
-): Map<string, LocalNote> {
+  local: Map<string, LocalItem>,
+): Map<string, LocalItem> {
   const owners = new Map<string, Entry>();
   const byMove = [...entries].sort(
     (a, b) => Number(!a.moved) - Number(!b.moved),
   );
+  // A note never pairs with an attachment: NOTE can't turn one into the other.
+  const sameKind = (entry: Entry, item: LocalItem) =>
+    isNotePath(entry.path) === isNotePath(item.path);
   for (const entry of byMove) {
     const key = pathKey(currentPath(entry));
-    if (local.has(key) && !owners.has(key)) owners.set(key, entry);
+    const item = local.get(key);
+    if (item && sameKind(entry, item) && !owners.has(key))
+      owners.set(key, entry);
   }
-  const found = new Map<string, LocalNote>();
+  const found = new Map<string, LocalItem>();
   for (const [key, entry] of owners) {
     const note = local.get(key);
     if (note) found.set(entry.id, note);
@@ -88,10 +96,12 @@ function claimLocal(
   const unclaimed = [...local]
     .filter(([key]) => !owners.has(key))
     .map(([, note]) => note);
-  const taken = new Set<LocalNote>();
+  const taken = new Set<LocalItem>();
   for (const entry of entries) {
     if (found.has(entry.id)) continue;
-    const matches = unclaimed.filter((note) => note.hash === entry.hash);
+    const matches = unclaimed.filter(
+      (item) => item.hash === entry.hash && sameKind(entry, item),
+    );
     const [match] = matches;
     if (matches.length !== 1 || !match || taken.has(match)) continue;
     taken.add(match);
@@ -102,8 +112,8 @@ function claimLocal(
 
 function updateOf(
   entry: Entry,
-  local: LocalNote,
-  remote: RemoteNote,
+  local: LocalItem,
+  remote: RemoteItem,
   newId: () => string,
 ): Step | null {
   const localChanged = local.hash !== entry.hash;

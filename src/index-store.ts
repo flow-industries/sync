@@ -59,31 +59,3 @@ export class IndexedDbIndex implements SyncIndex {
     await request(this.factory.deleteDatabase(this.name));
   }
 }
-
-/**
- * Deletes the device client's local database for one NOTE vault, every key
- * epoch of it, so an unlinked vault leaves no ciphertext in this app. A
- * database another window still holds open is left after `timeoutMs`.
- */
-export async function forgetVaultDatabases(
-  did: string,
-  vault: string,
-  factory: IDBFactory = indexedDB,
-  timeoutMs = 5_000,
-) {
-  const name = `flow-note:${did}:${vault}`;
-  const names = (await factory.databases?.()) ?? [];
-  await Promise.all(
-    names
-      .map((database) => database.name)
-      .filter(
-        (database) => database === name || database?.startsWith(`${name}:`),
-      )
-      .map((database) =>
-        Promise.race([
-          request(factory.deleteDatabase(database ?? name)),
-          new Promise((resolve) => setTimeout(resolve, timeoutMs)),
-        ]),
-      ),
-  );
-}

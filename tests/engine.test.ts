@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { type Deletions, SyncEngine } from "../src/engine";
+import {
+  type Deletions,
+  MAX_ATTACHMENT_BYTES,
+  SyncEngine,
+} from "../src/engine";
 import { MemoryIndex, MemoryRemote, MemoryVault } from "./fakes";
 
 async function setup(
@@ -31,40 +35,87 @@ const settled = async ({ engine }: Setup) => {
   return first;
 };
 const remotePaths = (remote: MemoryRemote) =>
-  [...remote.notes.values()]
-    .map((note) => `${note.path}: ${note.source}`)
+  [...remote.items.values()]
+    .map((item) => `${item.path}: ${remote.text(item.path)}`)
     .sort();
 const localPaths = (local: MemoryVault) =>
-  [...local.files].map(([path, file]) => `${path}: ${file.source}`).sort();
+  [...local.files.keys()].map((path) => `${path}: ${local.text(path)}`).sort();
 
 describe("engine: a first sync", () => {
-  test("pushes local notes, pulls remote ones, and leaves attachments and config alone", async () => {
+  test("pushes local files, pulls remote ones, and leaves config and unstorable names alone", async () => {
     const w = await setup();
+    const png = new Uint8Array([137, 80, 78, 71, 1, 2, 3]);
+    const pdf = new Uint8Array([37, 80, 68, 70, 9]);
     w.local.put("Here.md", "local");
     w.local.put("Dir/Deep.mdx", "<Mdx />");
-    w.local.put("photo.png", "binary");
+    w.local.put("Dir/photo.png", png);
     w.local.put("con.md", "a name NOTE refuses");
+    w.local.put("huge.bin", new Uint8Array(MAX_ATTACHMENT_BYTES + 1));
     w.remote.put("t", "There.md", "remote");
-    w.remote.put("hidden", ".obsidian/plugins/x/main.md", "never written");
+    w.remote.put("p", "Papers/paper.pdf", pdf);
+    w.remote.put("hidden", ".obsidian/plugins/x/main.js", "never written");
     const result = await settled(w);
-    expect(remotePaths(w.remote)).toEqual([
-      ".obsidian/plugins/x/main.md: never written",
-      "Dir/Deep.mdx: <Mdx />",
-      "Here.md: local",
-      "There.md: remote",
+    expect(
+      [...w.remote.items.values()].map((item) => item.path).sort(),
+    ).toEqual([
+      ".obsidian/plugins/x/main.js",
+      "Dir/Deep.mdx",
+      "Dir/photo.png",
+      "Here.md",
+      "Papers/paper.pdf",
+      "There.md",
     ]);
-    expect(localPaths(w.local)).toEqual([
-      "Dir/Deep.mdx: <Mdx />",
-      "Here.md: local",
-      "There.md: remote",
-      "con.md: a name NOTE refuses",
-      "photo.png: binary",
-    ]);
-    expect(result.attachments).toBe(1);
-    expect(result.unsyncable.sort()).toEqual([
-      ".obsidian/plugins/x/main.md",
+    expect(w.remote.byPath("Dir/photo.png")?.body).toEqual(png);
+    expect([...w.local.files.keys()].sort()).toEqual([
+      "Dir/Deep.mdx",
+      "Dir/photo.png",
+      "Here.md",
+      "Papers/paper.pdf",
+      "There.md",
       "con.md",
+      "huge.bin",
     ]);
+    expect(w.local.files.get("Papers/paper.pdf")?.body).toEqual(pdf);
+    expect(w.local.text("There.md")).toBe("remote");
+    expect(result.unsyncable.sort()).toEqual([
+      ".obsidian/plugins/x/main.js",
+      "con.md",
+      "huge.bin",
+    ]);
+  });
+
+  test("carries attachment edits, renames and conflicts, keeping the extension last", async () => {
+    const w = await setup();
+    w.local.put("a.png", new Uint8Array([1]));
+    await settled(w);
+    w.local.put("a.png", new Uint8Array([2]));
+    await settled(w);
+    expect(w.remote.byPath("a.png")?.body).toEqual(new Uint8Array([2]));
+    const id = w.remote.byPath("a.png")?.id ?? "";
+    await w.remote.rename(id, "img/b.png");
+    w.engine.remoteChanged();
+    await settled(w);
+    expect([...w.local.files.keys()]).toEqual(["img/b.png"]);
+    w.local.put("img/b.png", new Uint8Array([3]));
+    w.remote.put(id, "img/b.png", new Uint8Array([4]));
+    w.engine.remoteChanged();
+    await settled(w);
+    const copy = [...w.local.files.keys()].find((path) => path !== "img/b.png");
+    expect(copy).toMatch(/^img\/b conflict [0-9a-f]{8}\.png$/);
+    expect(w.local.files.get("img/b.png")?.body).toEqual(new Uint8Array([4]));
+    expect(w.local.files.get(copy ?? "")?.body).toEqual(new Uint8Array([3]));
+    expect(w.remote.byPath(copy ?? "")?.body).toEqual(new Uint8Array([3]));
+  });
+
+  test("a synced attachment that grows past the limit is left alone on both sides", async () => {
+    const w = await setup();
+    w.local.put("big.bin", new Uint8Array([1]));
+    await settled(w);
+    w.local.put("big.bin", new Uint8Array(MAX_ATTACHMENT_BYTES + 1));
+    const result = await w.engine.run();
+    expect(result.unsyncable).toEqual(["big.bin"]);
+    expect(w.remote.byPath("big.bin")?.body).toEqual(new Uint8Array([1]));
+    expect(w.local.files.has("big.bin")).toBe(true);
   });
 
   test("an existing note on both sides with different text keeps both", async () => {
@@ -78,7 +129,7 @@ describe("engine: a first sync", () => {
     expect(copy).toMatch(/^plan conflict [0-9a-f]{8}\.md$/);
     expect(w.local.text("plan.md")).toBe("theirs");
     expect(w.local.text(copy ?? "")).toBe("mine");
-    expect(w.remote.byPath(copy ?? "")?.source).toBe("mine");
+    expect(w.remote.text(copy ?? "")).toBe("mine");
   });
 });
 
@@ -97,7 +148,7 @@ describe("engine: after the first sync", () => {
     w.remote.put("b", "B.md", "two, edited there");
     w.engine.remoteChanged();
     await settled(w);
-    expect(w.remote.byPath("A.md")?.source).toBe("one, edited here");
+    expect(w.remote.text("A.md")).toBe("one, edited here");
     expect(w.local.text("B.md")).toBe("two, edited there");
   });
 
@@ -143,7 +194,7 @@ describe("engine: after the first sync", () => {
       path.startsWith("A conflict "),
     );
     expect(w.local.text(copy ?? "")).toBe("local edit");
-    expect(w.remote.byPath(copy ?? "")?.source).toBe("local edit");
+    expect(w.remote.text(copy ?? "")).toBe("local edit");
   });
 
   test("deletes both ways, into each side's trash", async () => {
@@ -153,7 +204,7 @@ describe("engine: after the first sync", () => {
     await w.remote.remove(b?.id ?? "");
     w.engine.remoteChanged();
     await settled(w);
-    expect(w.remote.notes.size).toBe(0);
+    expect(w.remote.items.size).toBe(0);
     expect(w.local.files.size).toBe(0);
     expect(w.local.trashed).toEqual(["A.md", "B.md"]);
   });
@@ -195,7 +246,7 @@ describe("engine: mass deletions", () => {
     const w = await setup({ confirm });
     for (let n = 0; n < 12; n++) w.remote.put(`n${n}`, `N${n}.md`, `${n}`);
     await settled(w);
-    w.remote.notes.clear();
+    w.remote.items.clear();
     w.engine.remoteChanged();
     return w;
   }
