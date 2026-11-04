@@ -35,8 +35,10 @@ const result = await Bun.build({
     "/* Bundled from https://github.com/flow-industries/sync; read the source there. */",
 });
 if (!result.success) {
-  for (const log of result.logs) console.error(log);
+  for (const log of result.logs) process.stderr.write(`${Bun.inspect(log)}\n`);
   process.exit(1);
 }
 for (const output of result.outputs)
-  console.log(`${output.path} ${(output.size / 1024).toFixed(0)} KiB`);
+  process.stdout.write(
+    `${output.path} ${(output.size / 1024).toFixed(0)} KiB\n`,
+  );

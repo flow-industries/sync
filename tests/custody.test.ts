@@ -95,9 +95,10 @@ describe("custody", () => {
     expect(custody.seed()).toBeNull();
     expect(await custody.credentials.read()).toBeNull();
     expect(await custody.checkpoints.read()).toBeNull();
-    await expect(
-      custody.credentials.write({ ...credentials, did: "nope" }),
-    ).rejects.toThrow("Invalid device credentials");
+    const refused = await custody.credentials
+      .write({ ...credentials, did: "nope" })
+      .catch((error: unknown) => error);
+    expect(refused).toEqual(new Error("Invalid device credentials"));
     expect(() => new Custody(secrets, "Has Spaces")).toThrow();
   });
 });

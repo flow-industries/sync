@@ -21,6 +21,7 @@ import {
   type LinkPrompt,
   linkDevice,
   type NoteDeviceCredentials,
+  type NoteDeviceFetch,
   openDeviceVault,
   pulledStatus,
   SYNC_LOCKED,
@@ -61,7 +62,7 @@ function obsidian(note: FakeFlowId, name: string) {
       stale: isStaleWrite,
     },
     host: TEST_HOST,
-    fetch: note.fetch,
+    fetch: (url, init) => note.fetch(url, init),
     local,
     configDir: ".obsidian",
     indexFor: (key) => {
@@ -267,7 +268,7 @@ describe("two Obsidian vaults synced through NOTE", () => {
     const seed = createDeviceSeed();
     const options = {
       host: TEST_HOST,
-      fetch: note.fetch,
+      fetch: ((url, init) => note.fetch(url, init)) satisfies NoteDeviceFetch,
       credentials: memoryStore<NoteDeviceCredentials>(),
       checkpoints: memoryStore<DeviceCheckpoint>(),
     };
@@ -342,5 +343,79 @@ describe("two Obsidian vaults synced through NOTE", () => {
       web.lock();
       device.stop();
     }
+  }, 60_000);
+});
+
+/**
+ * With "Automatically update internal links" on, Obsidian rewrites a third
+ * note's links for the new names, and the plugin pushes that edit before the
+ * renames. NOTE's rename then repairs the links it saw resolve to the moving
+ * note, which a single rename leaves right, but a chain or a swap re-targets.
+ */
+describe("links in a third note across renames, with Obsidian's link updates on", () => {
+  async function linkedWithIndex() {
+    const note = fakeFlowId();
+    const admin = await adminBrowser(note);
+    const vault = obsidian(note, "dddddd");
+    opened.push(vault);
+    vault.local.put("Alpha.md", "alpha");
+    vault.local.put("Beta.md", "beta");
+    vault.local.put("Index.md", "first [[Alpha]] then [[Beta]]");
+    await link(admin, vault);
+    await vault.controller.confirm();
+    await vault.controller.syncNow();
+    return vault;
+  }
+  /** Renames as Obsidian does, rewriting Index.md's links after each one. */
+  async function rename(
+    vault: Obsidian,
+    from: string,
+    to: string,
+    index: string,
+  ) {
+    await vault.local.move(from, to);
+    vault.controller.renamed(from, to);
+    vault.local.put("Index.md", index);
+  }
+  async function settle(vault: Obsidian) {
+    for (let round = 0; round < 3; round++) await vault.controller.syncNow();
+    await Bun.sleep(20);
+    await vault.controller.syncNow();
+  }
+
+  test("a single rename keeps them on the right notes", async () => {
+    const vault = await linkedWithIndex();
+    await rename(vault, "Alpha.md", "Zeta.md", "first [[Zeta]] then [[Beta]]");
+    await settle(vault);
+    expect(vault.local.text("Zeta.md")).toBe("alpha");
+    expect(vault.local.text("Index.md")).toBe("first [[Zeta]] then [[Beta]]");
+  }, 60_000);
+
+  // Pending a device-client option to skip link repair on renames Obsidian already repaired.
+  test.failing("a chain keeps them on the right notes", async () => {
+    const vault = await linkedWithIndex();
+    await rename(
+      vault,
+      "Beta.md",
+      "Gamma.md",
+      "first [[Alpha]] then [[Gamma]]",
+    );
+    await rename(vault, "Alpha.md", "Beta.md", "first [[Beta]] then [[Gamma]]");
+    await settle(vault);
+    expect(vault.local.text("Beta.md")).toBe("alpha");
+    expect(vault.local.text("Gamma.md")).toBe("beta");
+    expect(vault.local.text("Index.md")).toBe("first [[Beta]] then [[Gamma]]");
+  }, 60_000);
+
+  // Pending the same option.
+  test.failing("a swap keeps them on the right notes", async () => {
+    const vault = await linkedWithIndex();
+    await rename(vault, "Alpha.md", "tmp.md", "first [[tmp]] then [[Beta]]");
+    await rename(vault, "Beta.md", "Alpha.md", "first [[tmp]] then [[Alpha]]");
+    await rename(vault, "tmp.md", "Beta.md", "first [[Beta]] then [[Alpha]]");
+    await settle(vault);
+    expect(vault.local.text("Beta.md")).toBe("alpha");
+    expect(vault.local.text("Alpha.md")).toBe("beta");
+    expect(vault.local.text("Index.md")).toBe("first [[Beta]] then [[Alpha]]");
   }, 60_000);
 });
