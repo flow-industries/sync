@@ -7,7 +7,6 @@ import {
   isStaleWrite,
   linkDevice,
   openDeviceVault,
-  pulledStatus,
   SYNC_LOCKED,
   type TrustLoss,
 } from "./device";
@@ -45,7 +44,6 @@ export default class NoteSyncPlugin extends Plugin {
         linkDevice,
         openDeviceVault,
         locked: SYNC_LOCKED,
-        pulled: pulledStatus,
         stale: isStaleWrite,
       },
       host: FLOW_ID,

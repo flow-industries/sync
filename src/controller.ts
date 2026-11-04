@@ -16,7 +16,6 @@ import {
   type SyncIndex,
 } from "./engine";
 import type { IndexKey } from "./index-store";
-import { Traffic } from "./traffic";
 
 /** The device client calls the controller makes. */
 export interface DeviceClient {
@@ -28,8 +27,6 @@ export interface DeviceClient {
   ) => Promise<DeviceVault>;
   /** The status the device's sync reports once it lost access and wiped its keys. */
   locked: string;
-  /** Whether a status means the device's last sync read the vault, so its local copy is current. */
-  pulled: (status: string) => boolean;
   /** Whether a write was refused because the item changed since it was read (`NoteChangedError`). */
   stale: (error: unknown) => boolean;
 }
@@ -90,8 +87,21 @@ export interface ControllerOptions {
 const LOCAL_DEBOUNCE_MS = 1_500;
 const REMOTE_DEBOUNCE_MS = 500;
 const RETRY_MS = 30_000;
-/** How long a closed device's lock waits for a token refresh it already sent. */
+/** How long closing waits for the device's running work, a token refresh included, to finish. */
 const DRAIN_MS = 15_000;
+
+/** `work`, or nothing after `limit` ms; never rejects. */
+function within(work: Promise<unknown>, limit: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, limit);
+    void work
+      .catch(() => {})
+      .finally(() => {
+        clearTimeout(timer);
+        resolve();
+      });
+  });
+}
 
 /**
  * Links, opens and syncs one Obsidian vault with its NOTE vault, and owns the
@@ -113,7 +123,9 @@ export class SyncController {
   private generation = 0;
   private ready = false;
   private linking = false;
-  private traffic = new Traffic();
+  private pullRetry: ReturnType<typeof setTimeout> | undefined;
+  /** Settles once the last closed device has stopped: nothing of it touches its database or the PDS. */
+  private stopped: Promise<void> = Promise.resolve();
   /** Settles once the last closed device's lock is released. */
   private released: Promise<void> = Promise.resolve();
   /** The last stop or removal told to the person, so a retry that fails the same way stays quiet. */
@@ -244,14 +256,28 @@ export class SyncController {
 
   async syncNow() {
     if (this.phase.kind === "stopped") return this.start();
-    const { vault, engine } = this;
+    const { vault, engine, generation } = this;
     if (!vault || !engine) return;
     engine.reconsiderDeletions();
     engine.remoteChanged();
-    await vault.sync().catch(() => {});
+    await this.pull(vault, generation);
     await this.round();
     // The round's writes would sync on their own; this sends them now.
     await vault.sync().catch(() => {});
+  }
+
+  /**
+   * Syncs, and opens the gate for rounds once a sync has read the vault
+   * from the PDS. Until one has, the device's copy may be empty or old, and
+   * a round would read that as everything deleted, so it tries again later.
+   */
+  private async pull(vault: DeviceVault, generation: number) {
+    const report = await vault.sync().catch(() => ({ read: false }));
+    if (!this.live(generation)) return;
+    clearTimeout(this.pullRetry);
+    if (report.read) this.ready = true;
+    else if (!this.ready)
+      this.pullRetry = setTimeout(() => void this.syncNow(), RETRY_MS);
   }
 
   localChanged() {
@@ -265,26 +291,29 @@ export class SyncController {
 
   /**
    * Closes the vault and stops any round or open in flight; unsynced writes
-   * wait in the local database. The lock is released once the device's
-   * requests settle, so a token refresh it already sent lands first.
+   * wait in the local database. The lock is released once the device has
+   * stopped, so a token refresh it already sent lands before another
+   * transport reads the store.
    */
   close() {
     this.generation++;
     this.ready = false;
     clearTimeout(this.timer);
+    clearTimeout(this.pullRetry);
     for (const unsubscribe of this.unsubscribe.splice(0)) unsubscribe();
     this.engine?.stop();
-    this.vault?.stop();
+    if (this.vault) {
+      const earlier = this.stopped;
+      const stopping = this.vault.stop();
+      this.stopped = within(Promise.all([earlier, stopping]), DRAIN_MS);
+    }
     this.vault = null;
     this.engine = null;
     const release = this.release;
     this.release = null;
     if (release) {
       const earlier = this.released;
-      this.released = this.traffic
-        .idle(DRAIN_MS)
-        .then(() => earlier)
-        .then(release);
+      this.released = Promise.all([earlier, this.stopped]).then(release);
     }
   }
 
@@ -300,6 +329,8 @@ export class SyncController {
     this.close();
     custody.wipe();
     try {
+      // The device's databases go only once nothing of it writes to them.
+      await this.stopped;
       await forgetIndexes().catch(() => {});
       if (seed) await forgetDevice(seed).catch(() => {});
     } finally {
@@ -307,19 +338,12 @@ export class SyncController {
     }
   }
 
-  /** Options for one device transport, whose requests and token writes count toward its traffic. */
   private deviceOptions(): DeviceOptions {
     const { custody, host, fetch } = this.options;
-    const traffic = this.traffic;
-    const { credentials, checkpoints } = custody.scope();
     return {
       host,
-      fetch: (url, init) => traffic.track(() => fetch(url, init)),
-      credentials: {
-        read: credentials.read,
-        write: (value) => traffic.track(() => credentials.write(value)),
-      },
-      checkpoints,
+      fetch,
+      ...custody.scope(),
       onRemoved: async (reason) => {
         await this.forget();
         this.set({ kind: "removed", message: REMOVED[reason] });
@@ -339,7 +363,6 @@ export class SyncController {
     this.close();
     const generation = this.generation;
     const seed = custody.seed();
-    let vault: DeviceVault | undefined;
     try {
       const credentials = await custody.credentials.read();
       if (!this.live(generation)) return;
@@ -353,8 +376,10 @@ export class SyncController {
       if (!release)
         return this.set({ kind: "stopped", message: LOCKED_ELSEWHERE });
       this.release = release;
-      this.traffic = new Traffic();
-      vault = await device.openDeviceVault(seed, this.deviceOptions());
+      const vault = await device.openDeviceVault(seed, this.deviceOptions());
+      if (!this.live(generation)) return void vault.stop();
+      // Held from here, so any close stops it before the lock goes.
+      this.vault = vault;
       const checkpoint = await custody.checkpoints.read();
       if (!checkpoint) throw new Error("This vault's pin is missing.");
       const index = this.options.indexFor({
@@ -377,12 +402,11 @@ export class SyncController {
         stale: device.stale,
       });
       await engine.load();
-      if (!this.live(generation)) return vault.stop();
+      if (!this.live(generation)) return;
       if (vault.stranded) {
         engine.rebase();
         this.options.notify(STRANDED);
       }
-      this.vault = vault;
       this.engine = engine;
       this.unsubscribe.push(
         vault.subscribe((status) => this.statusChanged(status)),
@@ -397,9 +421,8 @@ export class SyncController {
       // Pull first, so edits made here while closed meet the remote's as a conflict copy beside the note.
       void this.syncNow();
     } catch (error) {
-      if (!this.live(generation)) return vault?.stop();
+      if (!this.live(generation)) return;
       this.close();
-      vault?.stop();
       if (this.phase.kind !== "removed")
         this.set({ kind: "stopped", message: messageOf(error) });
     } finally {
@@ -413,10 +436,6 @@ export class SyncController {
       this.close();
       void this.open();
       return;
-    }
-    if (!this.ready && this.options.device.pulled(status)) {
-      this.ready = true;
-      this.schedule(0);
     }
     if (this.phase.kind === "open") this.set({ kind: "open", status });
   }

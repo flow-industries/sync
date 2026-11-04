@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { SyncListener } from "@flow-industries/seal";
+import { SYNC_PENDING, SYNCED, type SyncListener } from "@flow-industries/seal";
 import {
   type ControllerOptions,
   KEY_MISSING,
@@ -36,8 +36,15 @@ const checkpoint = {
   runners: [],
 };
 
-/** A device vault over `MemoryRemote` whose sync reports `SYNCED` once `pull` lets it. */
-function deviceVault(remote: MemoryRemote, stranded = false) {
+/**
+ * A device vault over `MemoryRemote` whose sync reads the vault once `pull`
+ * lets it, and whose `stop()` settles once `stopping` does.
+ */
+function deviceVault(
+  remote: MemoryRemote,
+  stranded = false,
+  stopping: Promise<void> = Promise.resolve(),
+) {
   const listeners = new Set<SyncListener>();
   const state = { stopped: false, pull: true };
   const vault = {
@@ -56,8 +63,9 @@ function deviceVault(remote: MemoryRemote, stranded = false) {
     remove: (id, base) => remote.remove(id, base),
     compose: async () => ({ selectedId: "" }),
     sync: async () => {
-      if (state.pull)
-        for (const listener of listeners) await listener("Synced");
+      for (const listener of listeners)
+        await listener(state.pull ? SYNCED : SYNC_PENDING);
+      return { read: state.pull };
     },
     subscribe: (listener) => {
       listeners.add(listener);
@@ -67,6 +75,7 @@ function deviceVault(remote: MemoryRemote, stranded = false) {
     subscribeTrustLoss: () => () => {},
     stop: () => {
       state.stopped = true;
+      return stopping;
     },
     ...(stranded && {
       stranded: { count: 1, download: async () => new Blob() },
@@ -81,9 +90,9 @@ async function harness(
     stranded?: boolean;
     held?: boolean;
     confirmed?: boolean;
-    fetch?: ControllerOptions["fetch"];
     hold?: ControllerOptions["hold"];
     onOpen?: (options: DeviceOptions) => void;
+    stopping?: Promise<void>;
   } = {},
 ) {
   const secrets = new Secrets();
@@ -95,7 +104,7 @@ async function harness(
   const local = new MemoryVault();
   const remote = new MemoryRemote();
   const index = new MemoryIndex();
-  const device = deviceVault(remote, options.stranded);
+  const device = deviceVault(remote, options.stranded, options.stopping);
   const forgotten: string[] = [];
   const notices: string[] = [];
   const controllerOptions: ControllerOptions = {
@@ -109,11 +118,10 @@ async function harness(
         return device.vault;
       },
       locked: "Locked",
-      pulled: (status) => status === "Synced",
       stale: isStale,
     },
     host: "https://id.example",
-    fetch: options.fetch ?? (async () => new Response(null, { status: 404 })),
+    fetch: async () => new Response(null, { status: 404 }),
     local,
     configDir: ".obsidian",
     indexFor: () => index,
@@ -142,7 +150,7 @@ async function harness(
 }
 
 describe("controller", () => {
-  test("syncs only after the device has read the vault since it opened", async () => {
+  test("plans nothing until a sync since it opened read the vault, as one offline or rate-limited doesn't", async () => {
     const h = await harness();
     h.device.state.pull = false;
     h.local.put("Here.md", "local");
@@ -298,12 +306,12 @@ describe("controller", () => {
     expect(r.notices).toEqual([REMOVED.removed]);
   });
 
-  test("a reopen waits for a token refresh the closed device already sent", async () => {
-    const refresh = Promise.withResolvers<Response>();
+  test("a reopen waits until the closed device stopped, a token refresh it sent included", async () => {
+    const refreshed = Promise.withResolvers<void>();
     let opens = 0;
     let held = false;
     const h = await harness({
-      fetch: () => refresh.promise,
+      stopping: refreshed.promise,
       hold: async () => {
         if (held) return null;
         held = true;
@@ -311,11 +319,8 @@ describe("controller", () => {
           held = false;
         };
       },
-      onOpen: (options) => {
-        if (++opens === 1)
-          void options.fetch?.("https://id.example/refresh", {
-            method: "POST",
-          });
+      onOpen: () => {
+        opens++;
       },
     });
     await h.controller.start();
@@ -324,7 +329,7 @@ describe("controller", () => {
     await Bun.sleep(100);
     expect(opens).toBe(1);
     expect(h.controller.phase.kind).not.toBe("stopped");
-    refresh.resolve(new Response("{}"));
+    refreshed.resolve();
     await reopening;
     expect(opens).toBe(2);
     expect(h.controller.phase.kind).toBe("open");
@@ -358,6 +363,7 @@ function deviceOver(
     compose: async () => ({ selectedId: "" }),
     sync: async () => {
       for (const listener of listeners) await listener("Synced");
+      return { read: true };
     },
     subscribe: (listener) => {
       listeners.add(listener);
@@ -365,7 +371,7 @@ function deviceOver(
     },
     subscribeChanges: () => () => {},
     subscribeTrustLoss: () => () => {},
-    stop: () => {},
+    stop: async () => {},
   } as DeviceVault;
 }
 
@@ -398,7 +404,6 @@ function linkedVault(local: MemoryVault, opens: (() => DeviceVault)[]) {
         return open();
       },
       locked: "Locked",
-      pulled: (status) => status === "Synced",
       stale: isStale,
     },
     host: "https://id.example",

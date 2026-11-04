@@ -23,7 +23,6 @@ import {
   type NoteDeviceCredentials,
   type NoteDeviceFetch,
   openDeviceVault,
-  pulledStatus,
   SYNC_LOCKED,
   type TrustLoss,
 } from "../src/device";
@@ -58,7 +57,6 @@ function obsidian(note: FakeFlowId, name: string) {
       linkDevice,
       openDeviceVault,
       locked: SYNC_LOCKED,
-      pulled: pulledStatus,
       stale: isStaleWrite,
     },
     host: TEST_HOST,
@@ -341,7 +339,7 @@ describe("two Obsidian vaults synced through NOTE", () => {
       expect(sources.get(copy ?? "")).toBe("edited here");
     } finally {
       web.lock();
-      device.stop();
+      await device.stop();
     }
   }, 60_000);
 });
