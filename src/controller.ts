@@ -28,6 +28,8 @@ export interface DeviceClient {
   locked: string;
   /** Whether a status means the device's last sync read the vault, so its local copy is current. */
   pulled(status: string): boolean;
+  /** Whether a write was refused because the item changed since it was read (`NoteChangedError`). */
+  stale(error: unknown): boolean;
 }
 
 export type Phase =
@@ -298,6 +300,7 @@ export class SyncController {
         index: this.options.indexFor(credentials.did, checkpoint.vault),
         configDir: this.options.configDir,
         confirmDeletions: this.options.confirmDeletions,
+        stale: device.stale,
       });
       await engine.load();
       if (!this.live(generation)) return vault.stop();

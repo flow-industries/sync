@@ -9,7 +9,7 @@ import {
 import { Custody, type SecretBackend } from "../src/custody";
 import type { DeviceVault } from "../src/device";
 import { sha256 } from "../src/hash";
-import { MemoryIndex, MemoryRemote, MemoryVault } from "./fakes";
+import { isStale, MemoryIndex, MemoryRemote, MemoryVault } from "./fakes";
 
 class Secrets implements SecretBackend {
   values = new Map<string, string>();
@@ -40,7 +40,7 @@ function deviceVault(remote: MemoryRemote, stranded = false) {
   const state = { stopped: false, pull: true };
   const vault = {
     read: () => remote.read().then((view) => ({ ...view, folders: [] })),
-    saveNote: (note) => remote.saveNote(note),
+    saveNote: (note, options) => remote.saveNote(note, options),
     listAttachments: async () =>
       (await remote.listAttachments()).map((item) => ({
         ...item,
@@ -48,9 +48,10 @@ function deviceVault(remote: MemoryRemote, stranded = false) {
         size: 0,
       })),
     readAttachment: (id) => remote.readAttachment(id),
-    saveAttachment: (attachment) => remote.saveAttachment(attachment),
-    rename: (id, path) => remote.rename(id, path),
-    remove: (id) => remote.remove(id),
+    saveAttachment: (attachment, options) =>
+      remote.saveAttachment(attachment, options),
+    rename: (id, path, base) => remote.rename(id, path, base),
+    remove: (id, base) => remote.remove(id, base),
     compose: async () => ({ selectedId: "" }),
     sync: async () => {
       if (state.pull)
@@ -103,6 +104,7 @@ async function harness(
       },
       locked: "Locked",
       pulled: (status) => status === "Synced",
+      stale: isStale,
     },
     host: "https://id.example",
     fetch: async () => new Response(null, { status: 404 }),

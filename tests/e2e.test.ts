@@ -3,25 +3,30 @@ import {
   type AdminBrowser,
   adminBrowser,
   approveLink,
+  dropDevices,
   type FakeFlowId,
   fakeFlowId,
+  memoryStore,
   openAdminVault,
   TEST_DID,
   TEST_HOST,
 } from "@flow-industries/seal/testing";
-import { SyncController } from "../src/controller";
+import { REMOVED, SyncController } from "../src/controller";
 import { Custody, type SecretBackend } from "../src/custody";
 import {
   createDeviceSeed,
+  type DeviceCheckpoint,
   deleteDeviceStorage,
+  isStaleWrite,
   type LinkPrompt,
   linkDevice,
+  type NoteDeviceCredentials,
   openDeviceVault,
   pulledStatus,
   SYNC_LOCKED,
   type TrustLoss,
 } from "../src/device";
-import type { SyncIndex } from "../src/engine";
+import { SyncEngine, type SyncIndex } from "../src/engine";
 import { MemoryIndex, MemoryVault } from "./fakes";
 
 /**
@@ -53,6 +58,7 @@ function obsidian(note: FakeFlowId, name: string) {
       openDeviceVault,
       locked: SYNC_LOCKED,
       pulled: pulledStatus,
+      stale: isStaleWrite,
     },
     host: TEST_HOST,
     fetch: note.fetch,
@@ -137,22 +143,11 @@ describe("two Obsidian vaults synced through NOTE", () => {
     await a.controller.confirm();
     expect(a.custody.account()).toEqual({ did: TEST_DID });
     await a.controller.syncNow();
-    console.log(
-      "A",
-      JSON.stringify(a.controller.lastRound),
-      JSON.stringify(a.controller.phase),
-    );
     a.controller.close();
 
     await link(admin, b);
     await b.controller.confirm();
     await b.controller.syncNow();
-    console.log(
-      "B",
-      JSON.stringify(b.controller.lastRound),
-      JSON.stringify(b.controller.phase),
-      [...b.local.files.keys()],
-    );
     b.controller.close();
     expect(b.local.text("Inbox/First.md")).toBe("# Written in vault A");
     expect(b.local.text("Code.mdx")).toBe(
@@ -226,4 +221,125 @@ describe("two Obsidian vaults synced through NOTE", () => {
       false,
     );
   }, 120_000);
+
+  test("a vault removed under Access while syncing stops and wipes its keys, keeping its files", async () => {
+    const note = fakeFlowId();
+    const admin = await adminBrowser(note);
+    const a = obsidian(note, "cccccc");
+    opened.push(a);
+    a.local.put("Kept.md", "synced before removal");
+    await link(admin, a);
+    await a.controller.confirm();
+    await a.controller.syncNow();
+    expect(a.controller.phase.kind).toBe("open");
+
+    await dropDevices(admin);
+    a.local.put("Late.md", "written after removal");
+    await a.controller.syncNow();
+    for (
+      let wait = 0;
+      a.controller.phase.kind !== "removed" && wait < 100;
+      wait++
+    )
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(a.controller.phase).toEqual({
+      kind: "removed",
+      message: REMOVED.removed,
+    });
+    expect(a.custody.seed()).toBeNull();
+    expect(await a.custody.credentials.read()).toBeNull();
+    expect(await a.custody.checkpoints.read()).not.toBeNull();
+    expect(a.local.text("Kept.md")).toBe("synced before removal");
+    expect(a.local.text("Late.md")).toBe("written after removal");
+    const web = await openAdminVault(admin);
+    await web.sync();
+    expect((await web.read()).notes.map((item) => item.path)).toEqual([
+      "Kept.md",
+    ]);
+    web.lock();
+    expect(note.violations).toEqual([]);
+  }, 60_000);
+
+  test("an edit that reaches the device mid-round becomes a conflict copy, never overwritten", async () => {
+    const note = fakeFlowId();
+    const admin = await adminBrowser(note);
+    const seed = createDeviceSeed();
+    const options = {
+      host: TEST_HOST,
+      fetch: note.fetch,
+      credentials: memoryStore<NoteDeviceCredentials>(),
+      checkpoints: memoryStore<DeviceCheckpoint>(),
+    };
+    const prompt = Promise.withResolvers<LinkPrompt>();
+    const linking = linkDevice(seed, {
+      ...options,
+      label: "Obsidian on test",
+      onPrompt: prompt.resolve,
+    });
+    await approveLink(admin, await prompt.promise);
+    await linking;
+    const device = await openDeviceVault(seed, options);
+    const web = await openAdminVault(admin);
+    try {
+      const local = new MemoryVault();
+      const index = new MemoryIndex();
+      local.put("Plan.md", "first");
+      const engine = new SyncEngine({
+        local,
+        remote: device,
+        index,
+        configDir: ".obsidian",
+        stale: isStaleWrite,
+      });
+      await engine.load();
+      await engine.run();
+      await device.sync();
+
+      // NOTE's edit lands in the device's copy after the round has read it, but before it pushes.
+      local.put("Plan.md", "edited here");
+      let interleave = true;
+      const remote: typeof device = {
+        ...device,
+        read: async () => {
+          const view = await device.read();
+          if (interleave) {
+            interleave = false;
+            await web.sync();
+            const plan = (await web.read()).notes.find(
+              (item) => item.path === "Plan.md",
+            );
+            if (!plan) throw new Error("Missing Plan.md");
+            await web.save({ ...plan, source: "edited in NOTE" });
+            await web.sync();
+            await device.sync();
+          }
+          return view;
+        },
+      };
+      const racing = new SyncEngine({
+        local,
+        remote,
+        index,
+        configDir: ".obsidian",
+        stale: isStaleWrite,
+      });
+      await racing.load();
+      await racing.run();
+      const copy = [...local.files.keys()].find((path) =>
+        path.startsWith("Plan conflict "),
+      );
+      expect(local.text("Plan.md")).toBe("edited in NOTE");
+      expect(local.text(copy ?? "")).toBe("edited here");
+      await device.sync();
+      await web.sync();
+      const sources = new Map(
+        (await web.read()).notes.map((item) => [item.path, item.source]),
+      );
+      expect(sources.get("Plan.md")).toBe("edited in NOTE");
+      expect(sources.get(copy ?? "")).toBe("edited here");
+    } finally {
+      web.lock();
+      device.stop();
+    }
+  }, 60_000);
 });

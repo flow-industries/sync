@@ -52,22 +52,33 @@ export interface RemoteAttachmentView {
   revision: string;
   digest: string;
 }
-/** The linked NOTE vault, as the device client's `DeviceVault` offers it. */
+/** `current`: the write is refused unless its base is the stored revision. */
+export interface WriteOptions {
+  current?: boolean;
+}
+/**
+ * The linked NOTE vault, as the device client's `DeviceVault` offers it.
+ * Every write the engine makes is compare-and-swap: a save with
+ * `{ current: true }`, a rename or remove with the base the plan read.
+ */
 export interface RemoteVault {
   read(): Promise<{ notes: RemoteNoteView[] }>;
   listAttachments(): Promise<RemoteAttachmentView[]>;
   readAttachment(id: string): Promise<Uint8Array>;
   /** Each save resolves with the revision the content now has. */
-  saveNote(note: RemoteNoteView): Promise<RevisionBase>;
-  saveAttachment(attachment: {
-    id: string;
-    path: string;
-    bytes: Uint8Array;
-    revision?: string;
-    digest?: string;
-  }): Promise<RevisionBase>;
-  rename(id: string, path: string): Promise<RevisionBase>;
-  remove(id: string): Promise<void>;
+  saveNote(note: RemoteNoteView, options?: WriteOptions): Promise<RevisionBase>;
+  saveAttachment(
+    attachment: {
+      id: string;
+      path: string;
+      bytes: Uint8Array;
+      revision?: string;
+      digest?: string;
+    },
+    options?: WriteOptions,
+  ): Promise<RevisionBase>;
+  rename(id: string, path: string, base?: RevisionBase): Promise<RevisionBase>;
+  remove(id: string, base?: RevisionBase): Promise<void>;
 }
 /** Where the entries live between rounds: outside the vault folder, per linked device. */
 export interface SyncIndex {
@@ -102,6 +113,11 @@ export interface EngineOptions {
    * suddenly reads as empty looks exactly like everything deleted.
    */
   confirmDeletions?(deletions: Deletions): Promise<boolean>;
+  /**
+   * Whether a write was refused because the item changed in NOTE since the
+   * round read it; the round reads again and plans from there.
+   */
+  stale?(error: unknown): boolean;
   newId?(): string;
 }
 
@@ -115,6 +131,10 @@ const deletionsOf = (steps: readonly Step[]): Deletions => ({
   local: steps.filter((step) => step.kind === "delete-local").length,
   remote: steps.filter((step) => step.kind === "delete-remote").length,
 });
+const baseOf = (item: RemoteItem): RevisionBase | undefined =>
+  item.revision && item.digest
+    ? { revision: item.revision, digest: item.digest }
+    : undefined;
 const isDeletion = (step: Step) =>
   step.kind === "delete-local" || step.kind === "delete-remote";
 
@@ -425,7 +445,7 @@ export class SyncEngine {
     try {
       if (step.kind === "forget") this.entries.delete(step.id);
       else if (step.kind === "delete-remote") {
-        await this.options.remote.remove(step.id);
+        await this.options.remote.remove(step.id, baseOf(step.remote));
         this.remoteChanged();
         this.entries.delete(step.id);
       } else if (step.kind === "delete-local") {
@@ -436,6 +456,8 @@ export class SyncEngine {
       } else await this.update(step);
       result.applied++;
     } catch (error) {
+      this.remoteChanged();
+      if (this.options.stale?.(error)) return;
       result.failed.push({
         path:
           step.kind === "update"
@@ -445,7 +467,6 @@ export class SyncEngine {
               : step.id,
         error: error instanceof Error ? error.message : String(error),
       });
-      this.remoteChanged();
     }
   }
 
@@ -455,6 +476,10 @@ export class SyncEngine {
     return (await sha256(current)) === local.hash ? current : null;
   }
 
+  /**
+   * Compare-and-swap: an edit that reached NOTE after the round read `base`
+   * refuses the save instead of being replaced, and the round plans again.
+   */
   private save(
     id: string,
     path: string,
@@ -462,11 +487,16 @@ export class SyncEngine {
     base?: Partial<RevisionBase>,
   ) {
     const { remote } = this.options;
-    const revision = base?.revision;
-    const digest = base?.digest;
+    const { revision, digest } = base ?? {};
     return typeof body === "string"
-      ? remote.saveNote({ id, path, source: body, revision, digest })
-      : remote.saveAttachment({ id, path, bytes: body, revision, digest });
+      ? remote.saveNote(
+          { id, path, source: body, revision, digest },
+          { current: true },
+        )
+      : remote.saveAttachment(
+          { id, path, bytes: body, revision, digest },
+          { current: true },
+        );
   }
 
   private async update(step: Extract<Step, { kind: "update" }>) {
@@ -477,6 +507,17 @@ export class SyncEngine {
       digest: remote?.digest ?? "",
     };
     let hash = remote?.hash ?? local?.hash ?? "";
+    // The item's own compare-and-swap write goes first, so a refused one leaves no conflict copy for the next plan to duplicate.
+    if (content === "local") {
+      const body = local?.body;
+      if (body === undefined) throw new Error("Push without local content");
+      base = await this.save(id, path, body, remote);
+      this.remoteChanged();
+      hash = local?.hash ?? "";
+    } else if (remote && remote.path !== path) {
+      base = await vault.rename(id, path, baseOf(remote));
+      this.remoteChanged();
+    }
     if (copy) {
       const body = local?.body;
       if (body === undefined) throw new Error("Conflict without local content");
@@ -491,16 +532,6 @@ export class SyncEngine {
         hash: local?.hash ?? "",
         ...saved,
       });
-    }
-    if (content === "local") {
-      const body = local?.body;
-      if (body === undefined) throw new Error("Push without local content");
-      base = await this.save(id, path, body, remote);
-      this.remoteChanged();
-      hash = local?.hash ?? "";
-    } else if (remote && remote.path !== path) {
-      base = await vault.rename(id, path);
-      this.remoteChanged();
     }
     if (this.stopped) throw new Error("Sync stopped");
     if (local && local.path !== path) {

@@ -4,6 +4,7 @@ import { Custody } from "./custody";
 import {
   createDeviceSeed,
   deleteDeviceStorage,
+  isStaleWrite,
   linkDevice,
   openDeviceVault,
   pulledStatus,
@@ -43,6 +44,7 @@ export default class NoteSyncPlugin extends Plugin {
         openDeviceVault,
         locked: SYNC_LOCKED,
         pulled: pulledStatus,
+        stale: isStaleWrite,
       },
       host: FLOW_ID,
       fetch: requestUrlFetch(requestUrl),
@@ -68,7 +70,7 @@ export default class NoteSyncPlugin extends Plugin {
         if (this.settingTab.containerEl.isShown()) this.settingTab.display();
       },
       onTrustLoss: (loss) => trustLossNotice(loss),
-      notify: (message) => new Notice(`NOTE Sync: ${message}`, 0),
+      notify: (message) => new Notice(`FLOW NOTE Sync: ${message}`, 0),
     });
     this.settingTab = new NoteSyncSettingTab(this.app, this);
     this.addSettingTab(this.settingTab);
@@ -157,5 +159,5 @@ function trustLossNotice({ unsigned, stale }: TrustLoss) {
       ? `Links to moved code were left as they were: ${stale.join(", ")}.`
       : "",
   ].filter(Boolean);
-  if (lines.length) new Notice(`NOTE Sync: ${lines.join(" ")}`, 15_000);
+  if (lines.length) new Notice(`FLOW NOTE Sync: ${lines.join(" ")}`, 15_000);
 }

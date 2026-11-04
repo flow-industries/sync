@@ -5,6 +5,7 @@ import type {
   RemoteVault,
   RevisionBase,
   SyncIndex,
+  WriteOptions,
 } from "../src/engine";
 import { isNotePath, pathKey } from "../src/paths";
 import type { Body, Entry } from "../src/plan";
@@ -84,20 +85,35 @@ export class MemoryVault implements LocalVault {
   }
 }
 
+/** What the device client throws for a compare-and-swap write that lost: `NoteChangedError`. */
+export class StaleError extends Error {
+  constructor() {
+    super("This note changed. Read it again.");
+  }
+}
+export const isStale = (error: unknown) => error instanceof StaleError;
+
 interface RemoteRow extends RevisionBase {
   id: string;
   path: string;
   body: Body;
 }
 
-/** A NOTE vault in memory that refuses saves on a revision it can't place, as the device client does. */
+/**
+ * A NOTE vault in memory that places bases as the device client does: a save
+ * names any revision the item has had, or with `{ current: true }` the stored
+ * one; a rename or remove with a base, the stored one. `beforeWrite` lets a
+ * test land a NOTE edit between a round's read and its write.
+ */
 export class MemoryRemote implements RemoteVault {
   items = new Map<string, RemoteRow>();
   removed: string[] = [];
+  beforeWrite?: (id: string) => void;
   private revisions = 0;
+  private history = new Map<string, Set<string>>();
 
   put(id: string, path: string, body: Body) {
-    this.items.set(id, { id, path, body, ...this.revision() });
+    this.commit({ id, path, body });
   }
   byPath(path: string) {
     return [...this.items.values()].find((item) => item.path === path);
@@ -108,9 +124,15 @@ export class MemoryRemote implements RemoteVault {
       ? body
       : decoder.decode(body);
   }
-  private revision(): RevisionBase {
+  private commit(row: Omit<RemoteRow, keyof RevisionBase>): RevisionBase {
     const revision = `r${++this.revisions}`;
-    return { revision, digest: `d-${revision}` };
+    const saved = { revision, digest: `d-${revision}` };
+    this.items.set(row.id, { ...row, ...saved });
+    this.history.set(
+      row.id,
+      (this.history.get(row.id) ?? new Set()).add(revision),
+    );
+    return saved;
   }
   private collides(id: string, path: string) {
     return [...this.items.values()].some(
@@ -120,15 +142,25 @@ export class MemoryRemote implements RemoteVault {
   private write(
     row: Omit<RemoteRow, keyof RevisionBase>,
     base: Partial<RevisionBase>,
+    options: WriteOptions = {},
   ) {
-    const current = this.items.get(row.id);
-    if (current && current.revision !== base.revision)
-      throw new Error("This note changed. Read it again.");
+    this.beforeWrite?.(row.id);
+    this.check(row.id, base, options.current);
     if (this.collides(row.id, row.path))
       throw new Error("Filesystem path collision");
-    const saved = this.revision();
-    this.items.set(row.id, { ...row, ...saved });
-    return saved;
+    return this.commit(row);
+  }
+  private check(
+    id: string,
+    base: Partial<RevisionBase> | undefined,
+    current = false,
+  ) {
+    const stored = this.items.get(id);
+    if (!stored) return;
+    const placed = current
+      ? base?.revision === stored.revision
+      : !!base?.revision && !!this.history.get(id)?.has(base.revision);
+    if (!placed) throw new StaleError();
   }
   async read() {
     const notes: RemoteNoteView[] = [];
@@ -152,20 +184,24 @@ export class MemoryRemote implements RemoteVault {
     if (!(body instanceof Uint8Array)) throw new Error("Missing attachment");
     return body.slice();
   }
-  async saveNote(note: RemoteNoteView) {
+  async saveNote(note: RemoteNoteView, options?: WriteOptions) {
     if (!isNotePath(note.path)) throw new Error("Note path must end in .md");
     return this.write(
       { id: note.id, path: note.path, body: note.source },
       note,
+      options,
     );
   }
-  async saveAttachment(attachment: {
-    id: string;
-    path: string;
-    bytes: Uint8Array;
-    revision?: string;
-    digest?: string;
-  }) {
+  async saveAttachment(
+    attachment: {
+      id: string;
+      path: string;
+      bytes: Uint8Array;
+      revision?: string;
+      digest?: string;
+    },
+    options?: WriteOptions,
+  ) {
     if (isNotePath(attachment.path))
       throw new Error("This path is reserved for notes and preferences.");
     return this.write(
@@ -175,17 +211,20 @@ export class MemoryRemote implements RemoteVault {
         body: attachment.bytes.slice(),
       },
       attachment,
+      options,
     );
   }
-  async rename(id: string, path: string) {
+  async rename(id: string, path: string, base?: RevisionBase) {
+    this.beforeWrite?.(id);
     const current = this.items.get(id);
     if (!current) throw new Error("Missing note");
+    if (base) this.check(id, base, true);
     if (this.collides(id, path)) throw new Error("Filesystem path collision");
-    const saved = this.revision();
-    this.items.set(id, { ...current, path, ...saved });
-    return saved;
+    return this.commit({ ...current, path });
   }
-  async remove(id: string) {
+  async remove(id: string, base?: RevisionBase) {
+    this.beforeWrite?.(id);
+    if (base) this.check(id, base, true);
     this.items.delete(id);
     this.removed.push(id);
   }

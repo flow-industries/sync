@@ -50,7 +50,7 @@ export type Step =
       copy?: string;
     }
   | { kind: "delete-local"; id: string; local: LocalItem }
-  | { kind: "delete-remote"; id: string }
+  | { kind: "delete-remote"; id: string; remote: RemoteItem }
   | { kind: "forget"; id: string };
 
 export interface PlanInput {
@@ -172,7 +172,7 @@ export function plan({
     else if (!l && r)
       steps.push(
         r.hash === entry.hash
-          ? { kind: "delete-remote", id: entry.id }
+          ? { kind: "delete-remote", id: entry.id, remote: r }
           : {
               kind: "update",
               id: r.id,

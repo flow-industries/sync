@@ -4,7 +4,7 @@ import {
   MAX_ATTACHMENT_BYTES,
   SyncEngine,
 } from "../src/engine";
-import { MemoryIndex, MemoryRemote, MemoryVault } from "./fakes";
+import { isStale, MemoryIndex, MemoryRemote, MemoryVault } from "./fakes";
 
 async function setup(
   options: { confirm?: (deletions: Deletions) => Promise<boolean> } = {},
@@ -18,6 +18,7 @@ async function setup(
     remote,
     index,
     configDir: ".obsidian",
+    stale: isStale,
     confirmDeletions: async (deletions) => {
       asked.push(deletions);
       return (await options.confirm?.(deletions)) ?? true;
@@ -226,6 +227,69 @@ describe("engine: after the first sync", () => {
     );
     expect(w.local.text("B.md")).toBe("remote edit");
     expect(w.local.text(copy ?? "")).toBe("typed meanwhile");
+  });
+
+  test("a NOTE edit that lands between the read and the push becomes a conflict, never overwritten", async () => {
+    const w = await synced();
+    const a = w.remote.byPath("A.md")?.id ?? "";
+    w.local.put("A.md", "local edit");
+    w.remote.beforeWrite = (id) => {
+      if (id !== a) return;
+      w.remote.beforeWrite = undefined;
+      w.remote.put(a, "A.md", "remote edit");
+    };
+    const result = await settled(w);
+    expect(result.failed).toEqual([]);
+    const copy = [...w.local.files.keys()].find((path) =>
+      path.startsWith("A conflict "),
+    );
+    expect(w.remote.text("A.md")).toBe("remote edit");
+    expect(w.local.text("A.md")).toBe("remote edit");
+    expect(w.local.text(copy ?? "")).toBe("local edit");
+    expect(w.remote.text(copy ?? "")).toBe("local edit");
+  });
+
+  test("a NOTE edit that lands before a deletion reaches it comes back instead", async () => {
+    const w = await synced();
+    const a = w.remote.byPath("A.md")?.id ?? "";
+    await w.local.trash("A.md");
+    w.remote.beforeWrite = (id) => {
+      if (id !== a) return;
+      w.remote.beforeWrite = undefined;
+      w.remote.put(a, "A.md", "edited there");
+    };
+    const result = await settled(w);
+    expect(result.failed).toEqual([]);
+    expect(w.remote.removed).toEqual([]);
+    expect(w.remote.text("A.md")).toBe("edited there");
+    expect(w.local.text("A.md")).toBe("edited there");
+  });
+
+  test("a NOTE edit that lands while a conflict is resolved leaves one copy", async () => {
+    const w = await synced();
+    const a = w.remote.byPath("A.md")?.id ?? "";
+    await w.local.move("A.md", "Moved.md");
+    w.engine.renamed("A.md", "Moved.md");
+    w.local.put("Moved.md", "local edit");
+    w.remote.put(a, "A.md", "remote edit");
+    w.engine.remoteChanged();
+    w.remote.beforeWrite = (id) => {
+      if (id !== a) return;
+      w.remote.beforeWrite = undefined;
+      w.remote.put(a, "A.md", "remote edit, again");
+    };
+    await settled(w);
+    const copies = [...w.local.files.keys()].filter((path) =>
+      path.startsWith("Moved conflict "),
+    );
+    expect(copies.length).toBe(1);
+    expect(w.local.text(copies[0] ?? "")).toBe("local edit");
+    expect(w.local.text("Moved.md")).toBe("remote edit, again");
+    expect(remotePaths(w.remote)).toEqual([
+      "B.md: two",
+      `${copies[0]}: local edit`,
+      "Moved.md: remote edit, again",
+    ]);
   });
 
   test("resumes from the saved index without redoing anything", async () => {

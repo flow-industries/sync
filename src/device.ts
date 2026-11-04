@@ -1,4 +1,8 @@
-import { parseSyncBackoff, SYNCED } from "@flow-industries/seal";
+import {
+  NoteChangedError,
+  parseSyncBackoff,
+  SYNCED,
+} from "@flow-industries/seal";
 
 /** The one place the plugin imports the NOTE device client from. */
 export {
@@ -30,3 +34,6 @@ export {
  */
 export const pulledStatus = (status: string) =>
   status === SYNCED || parseSyncBackoff(status) !== undefined;
+/** Whether a compare-and-swap write was refused because the item changed in NOTE since it was read. */
+export const isStaleWrite = (error: unknown) =>
+  error instanceof NoteChangedError;
