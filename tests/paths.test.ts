@@ -29,6 +29,10 @@ describe("which files sync", () => {
       "a.jsx",
       "tool.py",
       "run.sh",
+      "plugin.ts",
+      "lib.mts",
+      "lib.cts",
+      "view.tsx",
     ])
       expect(exclusion(path, ".obsidian")).toBe("script");
     expect(exclusion("notes/json.md", ".obsidian")).toBeNull();

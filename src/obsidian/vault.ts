@@ -1,5 +1,4 @@
 import { type App, MarkdownView, normalizePath, Platform } from "obsidian";
-import type { ResolveTxt } from "../account";
 import type { SecretBackend } from "../custody";
 import type { LocalVault } from "../engine";
 import { parentOf, pathKey } from "../paths";
@@ -171,17 +170,4 @@ export function defaultLabel(): string {
             ? "Linux"
             : "this device";
   return `Obsidian on ${platform}`;
-}
-
-/** Node's DNS lookups on desktop, for handles verified by a TXT record; mobile has none. */
-export function desktopResolveTxt(): ResolveTxt | undefined {
-  if (!Platform.isDesktopApp) return undefined;
-  const { require } = window as unknown as {
-    require?: (id: string) => unknown;
-  };
-  const dns = require?.("node:dns") as
-    | { promises?: { resolveTxt?: ResolveTxt } }
-    | undefined;
-  const lookup = dns?.promises?.resolveTxt;
-  return lookup && ((name) => lookup.call(dns?.promises, name));
 }

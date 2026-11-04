@@ -38,11 +38,13 @@ export type Exclusion = "config" | "hidden" | "script" | "unsafe-name";
 
 /**
  * Scripts that other plugins run from the vault: Dataview views, Templater
- * and QuickAdd user scripts and CustomJS run JavaScript, others run Python
- * or shell files. Synced, they would let any linked device run code here,
- * past NOTE's rule that another admin's code never runs by itself.
+ * and QuickAdd user scripts and CustomJS run JavaScript, CodeScript Toolkit
+ * runs TypeScript, others run Python or shell files. Synced, they would let
+ * any linked device run code here, past NOTE's rule that another admin's
+ * code never runs by itself. `.ts` is also a video extension; those stay
+ * out too.
  */
-const SCRIPT = /\.(?:[cm]?js|jsx|py|sh)$/iu;
+const SCRIPT = /\.(?:[cm]?[jt]s|[jt]sx|py|sh)$/iu;
 
 /**
  * Why a path stays out of sync in either direction, or null when it syncs.

@@ -20,13 +20,14 @@ Syncing starts once the device has read your whole notepad. Until then, nothing 
 - **Notes and attachments:** every Markdown (`.md`) and MDX (`.mdx`) note, and every other file (images, PDFs, audio and the rest) up to 32 MB, both ways.
 - **Renames** carry across, including folder renames. A rename the plugin didn't see (Obsidian was closed) is recognised by the file's unchanged content. When you rename an attachment here, Obsidian updates the links to it, and those edits sync like any other.
 - **Deletions** carry across. In NOTE they go to NOTE's trash. Here they follow Obsidian's **Deleted files** setting: the system trash, the vault's `.trash` folder, or, if you chose to delete permanently, a permanent deletion, though NOTE's trash still has the file. An edit beats a deletion: if one side edited a file the other deleted, it comes back. Before a sync would delete more than fifty files, or more than ten that are also over a tenth of the vault, the plugin asks.
-- **Swapped names** carry across too: two files that trade names, on either side, converge. While one waits for the other to leave its name, it may briefly sit beside it as `<name> moving <8 hex>.md`.
+- **Swapped names** carry across too: two files that trade names, on either side, converge. While one waits for the other to leave its name, it may briefly sit beside it as `<name> moving <8 hex>.md`, and a sync that stops right then finishes the move next time.
+- **Known issue:** with Obsidian's **Automatically update internal links** on, a chain of renames (Beta to Gamma, then Alpha to Beta) or a swap can point links in other notes at the wrong note, on every device. A single rename is fine. The fix waits on the device client.
 - **Conflicts:** when both sides changed the same file, NOTE's version keeps the name and this vault's is saved beside it. A note's copy is named `<name> conflict <8 hex>.md`, the way NOTE names its own conflict copies; an attachment's keeps its extension last, `<name> conflict <8 hex>.png`, so Obsidian still opens it. Nothing is overwritten while you type: a file that changes during a sync, or an open note with unsaved typing, is left alone until the next sync. The same holds in NOTE: every write names the version it was planned from, so an edit that reaches NOTE during a sync is never replaced or trashed; the sync reads again and plans from there.
 
 **Not synced:**
 
 - Obsidian's config folder (`.obsidian/`) and anything hidden. The config folder holds plugin code, so nothing from NOTE is ever written into it.
-- Scripts that other plugins run from the vault: `.js`, `.mjs`, `.cjs`, `.jsx`, `.py` and `.sh` files (Dataview views, Templater and QuickAdd user scripts, CustomJS and the like). Synced, they would let any device linked to your notepad run code on this one.
+- Scripts that other plugins run from the vault: `.js`, `.mjs`, `.cjs`, `.jsx`, `.ts`, `.mts`, `.cts`, `.tsx`, `.py` and `.sh` files (Dataview views, Templater and QuickAdd user scripts, CustomJS, CodeScript Toolkit and the like). Synced, they would let any device linked to your notepad run code on this one. `.ts` is also an extension for MPEG transport-stream video, and those files stay out too.
 - Attachments over 32 MB, names NOTE can't store (such as `con.md` or a name ending in a dot), names that differ from a synced file's only in case, and NOTE files whose names this vault can't hold. Settings lists them. A synced file that becomes one of these is left as it is on both sides, never deleted. The exception is a file moved into a hidden folder from outside Obsidian: Obsidian doesn't list hidden files, so to the plugin that reads as a deletion, and NOTE's copy goes to NOTE's trash.
 
 ## Note content never runs
@@ -64,7 +65,8 @@ The plugin also keeps two caches in Obsidian's app data, never in the vault: the
 
 - **id.flow.industries** (Flow ID): links the device, refreshes its tokens, and relays your encrypted notepad to and from your PDS. Only the device name, its public keys, a slow hash of the device code and ciphertext leave this device.
 - **note.flow.talk**: opened in your browser to approve the link. The plugin itself doesn't contact it.
-- **plc.directory**, or a `did:web` account's own domain, and **your handle's domain** (`https://<handle>/.well-known/atproto-did`, and on desktop the DNS record `_atproto.<handle>` through your system's resolver): read once at linking to show the account's handle.
+- **plc.directory**, or a `did:web` account's own domain, and **your handle's domain** (`https://<handle>/.well-known/atproto-did`): read once at linking to show the account's handle.
+- **cloudflare-dns.com**: asked for the DNS record `_atproto.<handle>` over DNS-over-HTTPS, only when the handle's domain doesn't answer over HTTPS. The network's own resolver isn't trusted for this.
 
 The plugin sends no telemetry.
 

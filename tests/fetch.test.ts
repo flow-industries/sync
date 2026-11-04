@@ -13,8 +13,7 @@ describe("fetch over requestUrl", () => {
       return {
         status: 409,
         headers: { "content-type": "application/json" },
-        arrayBuffer: new TextEncoder().encode('{"code":"CONFLICT"}')
-          .buffer as ArrayBuffer,
+        arrayBuffer: new TextEncoder().encode('{"code":"CONFLICT"}').buffer,
       };
     });
     const bytes = new Uint8Array([9, 8, 7, 6]).subarray(1, 3);
@@ -38,7 +37,9 @@ describe("fetch over requestUrl", () => {
       signal: controller.signal,
     });
     controller.abort(new Error("gone"));
-    await expect(pending).rejects.toThrow("gone");
+    expect(await pending.catch((error: unknown) => error)).toEqual(
+      new Error("gone"),
+    );
     const empty = requestUrlFetch(async () => ({
       status: 204,
       headers: {},
@@ -85,24 +86,46 @@ describe("the linked account", () => {
 
 describe("the linked account's handle", () => {
   const did = "did:plc:abcdefghijklmnopqrstuvwx";
+  const name = "_atproto.alice.example.com";
   const document = { id: did, alsoKnownAs: ["at://alice.example.com"] };
-  const documentOnly: NoteDeviceFetch = async (url) =>
-    url === `https://plc.directory/${did}`
-      ? Response.json(document)
-      : new Response("not found", { status: 404 });
+  /** The DID document, and DNS-over-HTTPS answering `records` as TXT data for the handle. */
+  const withDns =
+    (records: string[], status = 0): NoteDeviceFetch =>
+    async (url, init) => {
+      if (url === `https://plc.directory/${did}`)
+        return Response.json(document);
+      if (
+        url === `https://cloudflare-dns.com/dns-query?name=${name}&type=TXT` &&
+        new Headers(init.headers).get("accept") === "application/dns-json"
+      )
+        return Response.json({
+          Status: status,
+          Answer: records.map((data) => ({ name, type: 16, data })),
+        });
+      return new Response("not found", { status: 404 });
+    };
 
-  test("is also verified by DNS where the platform can look it up", async () => {
-    const dns = async (name: string) =>
-      name === "_atproto.alice.example.com" ? [[`did=${did}`], ["v=spf1"]] : [];
-    expect(await linkedAccount(did, documentOnly, dns)).toEqual({
+  test("is also verified by DNS, asked over HTTPS rather than the network's resolver", async () => {
+    const verified = { did, handle: "alice.example.com" };
+    expect(
+      await linkedAccount(did, withDns([`"did=${did}"`, '"v=spf1 -all"'])),
+    ).toEqual(verified);
+    expect(
+      await linkedAccount(did, withDns([`"did=did:plc:" "${did.slice(8)}"`])),
+    ).toEqual(verified);
+    expect(await linkedAccount(did, withDns([]))).toEqual({ did });
+    expect(
+      await linkedAccount(
+        did,
+        withDns([`"did=${did}"`, '"did=did:plc:other"']),
+      ),
+    ).toEqual({ did });
+    expect(await linkedAccount(did, withDns(['"did=did:plc:other"']))).toEqual({
       did,
-      handle: "alice.example.com",
     });
-    expect(await linkedAccount(did, documentOnly)).toEqual({ did });
-    const two = async () => [[`did=${did}`], ["did=did:plc:other"]];
-    expect(await linkedAccount(did, documentOnly, two)).toEqual({ did });
-    const elsewhere = async () => [["did=did:plc:other"]];
-    expect(await linkedAccount(did, documentOnly, elsewhere)).toEqual({ did });
+    expect(await linkedAccount(did, withDns([`"did=${did}"`], 2))).toEqual({
+      did,
+    });
   });
 
   test("shows the domain that vouched for it, so a lookalike reads as itself", () => {

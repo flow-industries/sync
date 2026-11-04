@@ -19,7 +19,6 @@ import { NoteSyncSettingTab, statusText } from "./obsidian/settings";
 import {
   custodyNote,
   defaultLabel,
-  desktopResolveTxt,
   deviceNamespace,
   obsidianSecrets,
   obsidianVault,
@@ -51,7 +50,6 @@ export default class NoteSyncPlugin extends Plugin {
       },
       host: FLOW_ID,
       fetch: requestUrlFetch(requestUrl),
-      resolveTxt: desktopResolveTxt(),
       local: obsidianVault(this.app),
       configDir: this.app.vault.configDir,
       indexFor: (key) => new IndexedDbIndex(indexName(namespace, key)),

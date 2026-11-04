@@ -8,6 +8,9 @@ export interface LinkedAccount {
 }
 
 const PLC_DIRECTORY = "https://plc.directory";
+/** Cloudflare's DNS-over-HTTPS resolver, asked only when a handle's HTTPS check fails. */
+const DNS_OVER_HTTPS = "https://cloudflare-dns.com/dns-query";
+const TXT = 16;
 const HANDLE =
   /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]*[a-z0-9]$/u;
 const TIMEOUT_MS = 8_000;
@@ -20,6 +23,17 @@ async function getJson(fetch: NoteDeviceFetch, url: string): Promise<unknown> {
   });
   if (!response.ok) throw new Error(`${url} answered ${response.status}`);
   return response.json();
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null;
+
+/** A TXT record's text, as DNS-over-HTTPS writes it: one or more quoted strings. */
+function txtText(data: string): string {
+  const parts = [...data.matchAll(/"((?:[^"\\]|\\.)*)"/gu)].map((match) =>
+    (match[1] ?? "").replace(/\\(.)/gu, "$1"),
+  );
+  return parts.length ? parts.join("") : data;
 }
 
 function documentUrl(did: string): string | null {
@@ -45,9 +59,6 @@ function claimedHandle(document: unknown, did: string): string | null {
   return handle && HANDLE.test(handle) ? handle : null;
 }
 
-/** A DNS TXT lookup, where the platform offers one (desktop): each record as its chunks. */
-export type ResolveTxt = (name: string) => Promise<string[][]>;
-
 async function answersOverHttps(
   handle: string,
   did: string,
@@ -64,16 +75,40 @@ async function answersOverHttps(
   }
 }
 
-/** The DNS method: exactly one `did=` record at `_atproto.<handle>`, naming `did`. */
+/**
+ * The DNS method, exactly one `did=` TXT record at `_atproto.<handle>`
+ * naming `did`, asked over DNS-over-HTTPS: the network's own resolver could
+ * answer anything, while this answer comes over TLS from the resolver.
+ */
 async function answersOverDns(
   handle: string,
   did: string,
-  resolveTxt: ResolveTxt,
+  fetch: NoteDeviceFetch,
 ): Promise<boolean> {
   try {
-    const claims = (await resolveTxt(`_atproto.${handle}`))
-      .map((chunks) => chunks.join(""))
-      .filter((record) => record.startsWith("did="));
+    const name = `_atproto.${handle}`;
+    const response = await fetch(
+      `${DNS_OVER_HTTPS}?name=${encodeURIComponent(name)}&type=TXT`,
+      {
+        method: "GET",
+        headers: { Accept: "application/dns-json" },
+        signal: AbortSignal.timeout(TIMEOUT_MS),
+      },
+    );
+    if (!response.ok) return false;
+    const answer: unknown = await response.json();
+    if (!isRecord(answer) || answer.Status !== 0) return false;
+    const records = Array.isArray(answer.Answer) ? answer.Answer : [];
+    const claims = records
+      .filter(
+        (record): record is { data: string } =>
+          isRecord(record) &&
+          record.name === name &&
+          record.type === TXT &&
+          typeof record.data === "string",
+      )
+      .map(({ data }) => txtText(data))
+      .filter((text) => text.startsWith("did="));
     return claims.length === 1 && claims[0] === `did=${did}`;
   } catch {
     return false;
@@ -83,14 +118,13 @@ async function answersOverDns(
 /**
  * Names the account behind `did` by its handle, checked both ways: the DID
  * document claims the handle, and the handle's domain answers with the DID,
- * over HTTPS or, where the platform can look it up, DNS. A DID document
+ * over HTTPS or in DNS. A DID document
  * alone could claim anyone's handle. Anything unverifiable leaves just the
  * DID, which is what the link actually bound.
  */
 export async function linkedAccount(
   did: string,
   fetch: NoteDeviceFetch,
-  resolveTxt?: ResolveTxt,
 ): Promise<LinkedAccount> {
   try {
     const url = documentUrl(did);
@@ -99,7 +133,7 @@ export async function linkedAccount(
     if (!handle) return { did };
     if (
       (await answersOverHttps(handle, did, fetch)) ||
-      (resolveTxt && (await answersOverDns(handle, did, resolveTxt)))
+      (await answersOverDns(handle, did, fetch))
     )
       return { did, handle };
   } catch {
