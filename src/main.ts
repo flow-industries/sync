@@ -4,11 +4,11 @@ import { Custody } from "./custody";
 import {
   createDeviceSeed,
   deleteDeviceStorage,
+  followsRead,
   isStaleWrite,
   linkDevice,
   openDeviceVault,
   SYNC_LOCKED,
-  SYNCED,
   type TrustLoss,
 } from "./device";
 import { requestUrlFetch } from "./fetch";
@@ -46,7 +46,7 @@ export default class NoteSyncPlugin extends Plugin {
         linkDevice,
         openDeviceVault,
         locked: SYNC_LOCKED,
-        synced: SYNCED,
+        followsRead,
         stale: isStaleWrite,
       },
       host: FLOW_ID,

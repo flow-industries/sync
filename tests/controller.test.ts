@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { SYNC_PENDING, SYNCED, type SyncListener } from "@flow-industries/seal";
+import {
+  SYNC_PENDING,
+  SYNC_QUOTA_REACHED,
+  SYNC_RATE_LIMITED,
+  SYNCED,
+  type SyncListener,
+} from "@flow-industries/seal";
 import {
   type ControllerOptions,
   KEY_MISSING,
@@ -9,7 +15,11 @@ import {
   SyncController,
 } from "../src/controller";
 import { Custody, type SecretBackend } from "../src/custody";
-import type { DeviceOptions, DeviceVault } from "../src/device";
+import {
+  type DeviceOptions,
+  type DeviceVault,
+  followsRead,
+} from "../src/device";
 import { sha256 } from "../src/hash";
 import { isStale, MemoryIndex, MemoryRemote, MemoryVault } from "./fakes";
 
@@ -50,6 +60,8 @@ function deviceVault(
     stopped: false,
     pull: true,
     syncs: 0,
+    /** What its syncs publish when they read the vault. */
+    status: SYNCED as Parameters<SyncListener>[0],
     /** A status from one of the device's own syncs, as its schedule runs them. */
     emit: (status: Parameters<SyncListener>[0]) => {
       for (const listener of listeners) void listener(status);
@@ -73,7 +85,7 @@ function deviceVault(
     sync: async () => {
       state.syncs++;
       for (const listener of listeners)
-        await listener(state.pull ? SYNCED : SYNC_PENDING);
+        await listener(state.pull ? state.status : SYNC_PENDING);
       return { read: state.pull };
     },
     subscribe: (listener) => {
@@ -127,7 +139,7 @@ async function harness(
         return device.vault;
       },
       locked: "Locked",
-      synced: SYNCED,
+      followsRead,
       stale: isStale,
     },
     host: "https://id.example",
@@ -320,6 +332,26 @@ describe("controller", () => {
     h.controller.close();
   });
 
+  test("a vault whose uploads stay refused starts syncing once the device's own syncs read it", async () => {
+    const h = await harness();
+    h.device.state.pull = false;
+    h.local.put("Typed.md", "typed here");
+    await h.controller.start();
+    await Bun.sleep(10);
+    expect(h.device.state.syncs).toBe(1);
+    // A full quota: the device's syncs now read the vault, but publish only the refusal's backoff.
+    const quota = `${SYNC_QUOTA_REACHED} · Next sync 12:00` as const;
+    h.device.state.pull = true;
+    h.device.state.status = quota;
+    h.device.state.emit(quota);
+    await Bun.sleep(10);
+    expect(h.remote.text("Typed.md")).toBe("typed here");
+    h.controller.close();
+    // A rate limit can refuse the read itself, so it never counts.
+    expect(followsRead(`${SYNC_RATE_LIMITED} · Next sync 12:00`)).toBe(false);
+    expect(followsRead(SYNC_PENDING)).toBe(false);
+  });
+
   test("a close while the vault still opens keeps the lock until that open settles and stops", async () => {
     const opened = Promise.withResolvers<void>();
     let held = false;
@@ -460,7 +492,7 @@ function linkedVault(local: MemoryVault, opens: (() => DeviceVault)[]) {
         return open();
       },
       locked: "Locked",
-      synced: SYNCED,
+      followsRead,
       stale: isStale,
     },
     host: "https://id.example",

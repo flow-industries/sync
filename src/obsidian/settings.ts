@@ -2,7 +2,7 @@ import { type App, type Plugin, PluginSettingTab, Setting } from "obsidian";
 import type { Phase, SyncController } from "../controller";
 import type { RoundResult } from "../engine";
 import { accountName, confirm } from "./modals";
-import { custodyNote } from "./vault";
+import { custodyNote, updatesLinks } from "./vault";
 
 /** The status bar's words for each phase. */
 export function statusText(phase: Phase, round: RoundResult | null): string {
@@ -125,6 +125,13 @@ export class NoteSyncSettingTab extends PluginSettingTab {
                 await controller.unlink();
               this.display();
             }),
+        );
+
+    if (!updatesLinks(this.app))
+      new Setting(containerEl)
+        .setName("Link updates")
+        .setDesc(
+          "Turn on automatic updates of internal links, in the files and links settings. Without them, renaming several notes in a row can leave links in other notes pointing at the wrong file on your other devices.",
         );
 
     const custody = custodyNote(this.app);

@@ -1,4 +1,10 @@
-import { NoteChangedError } from "@flow-industries/seal";
+import {
+  NoteChangedError,
+  parseSyncBackoff,
+  SYNC_QUOTA_REACHED,
+  SYNC_TOO_LARGE,
+  SYNCED,
+} from "@flow-industries/seal";
 
 /** The one place the plugin imports the NOTE device client from. */
 export {
@@ -19,7 +25,6 @@ export {
   type NoteDeviceFetch,
   openDeviceVault,
   SYNC_LOCKED,
-  SYNCED,
   type SyncListener,
   type TrustLoss,
 } from "@flow-industries/seal";
@@ -27,3 +32,18 @@ export {
 /** Whether a compare-and-swap write was refused because the item changed in NOTE since it was read. */
 export const isStaleWrite = (error: unknown) =>
   error instanceof NoteChangedError;
+
+/**
+ * Whether the device publishes `status` only after a sync that read the
+ * vault: one that went through, or one whose upload was refused for a full
+ * quota or an oversized notepad, which the device reaches only after the
+ * read. A rate limit can refuse the read itself, so it isn't one.
+ */
+export function followsRead(status: string): boolean {
+  const refusal = parseSyncBackoff(status)?.refusal;
+  return (
+    status === SYNCED ||
+    refusal === SYNC_QUOTA_REACHED ||
+    refusal === SYNC_TOO_LARGE
+  );
+}

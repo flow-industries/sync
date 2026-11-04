@@ -27,8 +27,8 @@ export interface DeviceClient {
   ) => Promise<DeviceVault>;
   /** The status the device's sync reports once it lost access and wiped its keys. */
   locked: string;
-  /** The status a sync that went through reports. */
-  synced: string;
+  /** Whether the device publishes `status` only after a sync that read the vault. */
+  followsRead: (status: string) => boolean;
   /** Whether a write was refused because the item changed since it was read (`NoteChangedError`). */
   stale: (error: unknown) => boolean;
 }
@@ -466,8 +466,8 @@ export class SyncController {
       void this.open();
       return;
     }
-    // The device syncs on its own schedule, backing off when refused: once one of its syncs goes through, one sync of ours learns whether it read the vault.
-    if (!this.ready && !this.pulling && status === this.options.device.synced)
+    // The device syncs on its own schedule, backing off when refused: once one of its syncs has read the vault, one sync of ours learns so.
+    if (!this.ready && !this.pulling && this.options.device.followsRead(status))
       void this.syncNow();
     if (this.phase.kind === "open") this.set({ kind: "open", status });
   }

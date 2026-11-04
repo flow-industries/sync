@@ -17,6 +17,7 @@ import {
   createDeviceSeed,
   type DeviceCheckpoint,
   deleteDeviceStorage,
+  followsRead,
   isStaleWrite,
   type LinkPrompt,
   linkDevice,
@@ -24,7 +25,6 @@ import {
   type NoteDeviceFetch,
   openDeviceVault,
   SYNC_LOCKED,
-  SYNCED,
   type TrustLoss,
 } from "../src/device";
 import { SyncEngine, type SyncIndex } from "../src/engine";
@@ -60,7 +60,7 @@ function obsidian(note: FakeFlowId, name: string) {
       linkDevice,
       openDeviceVault,
       locked: SYNC_LOCKED,
-      synced: SYNCED,
+      followsRead,
       stale: isStaleWrite,
     },
     host: TEST_HOST,

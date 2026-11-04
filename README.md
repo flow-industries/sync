@@ -29,6 +29,11 @@ Syncing starts once the device has read your whole notepad. Until then, nothing 
 - Scripts that other plugins run from the vault: `.js`, `.mjs`, `.cjs`, `.jsx`, `.ts`, `.mts`, `.cts`, `.tsx`, `.py` and `.sh` files (Dataview views, Templater and QuickAdd user scripts, CustomJS, CodeScript Toolkit and the like). Synced, they would let any device linked to your notepad run code on this one. `.ts` is also an extension for MPEG transport-stream video, and those files stay out too.
 - Attachments over 32 MB, names NOTE can't store (such as `con.md` or a name ending in a dot), names that differ from a synced file's only in case, and NOTE files whose names this vault can't hold. Settings lists them. A synced file that becomes one of these is left as it is on both sides, never deleted. The exception is a file moved into a hidden folder from outside Obsidian: Obsidian doesn't list hidden files, so to the plugin that reads as a deletion, and NOTE's copy goes to NOTE's trash.
 
+**Known limits with links:**
+
+- **Obsidian asking before it updates links.** With **Settings → Files and links → Automatically update internal links** off, which is Obsidian's default, Obsidian asks before updating links. The plugin can't tell whether you chose to update, so it has NOTE repair them too. That's right for one rename, but a chain or swap of renames made a second or two apart can leave links in other notes pointing at the wrong note. Turn the setting on to avoid it.
+- **Another plugin moving files.** A plugin that moves files without updating links, while that setting is on, leaves the links in `.md` notes as they are, in NOTE as in this vault.
+
 ## Note content never runs
 
 The plugin treats every note as text. It never evaluates MDX, code blocks or anything else in a note, and it doesn't sync script files (see above). Other plugins you install may run code from notes: Dataview's JavaScript queries or Templater templates, for example. With sync on, those notes can come from your other devices.
