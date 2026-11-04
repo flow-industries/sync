@@ -198,6 +198,18 @@ describe("engine: after the first sync", () => {
     expect(w.remote.text(copy ?? "")).toBe("local edit");
   });
 
+  test("NOTE deleting an empty note deletes it here too, once", async () => {
+    const w = await setup();
+    w.local.put("Empty.md", "");
+    w.local.put("Full.md", "text");
+    await settled(w);
+    await w.remote.remove(w.remote.byPath("Empty.md")?.id ?? "");
+    await w.remote.remove(w.remote.byPath("Full.md")?.id ?? "");
+    w.engine.remoteChanged();
+    await settled(w);
+    expect(w.local.trashed.sort()).toEqual(["Empty.md", "Full.md"]);
+  });
+
   test("deletes both ways, into each side's trash", async () => {
     const w = await synced();
     await w.local.trash("A.md");
@@ -305,6 +317,83 @@ describe("engine: after the first sync", () => {
   });
 });
 
+describe("engine: renames into names other items are leaving", () => {
+  async function three() {
+    const w = await setup();
+    w.local.put("A.md", "a");
+    w.local.put("B.md", "b");
+    w.local.put("C.md", "c");
+    await settled(w);
+    return w;
+  }
+  const moveHere = async (w: Setup, from: string, to: string) => {
+    await w.local.move(from, to);
+    w.engine.renamed(from, to);
+  };
+  const parked = (w: Setup) =>
+    [
+      ...w.local.files.keys(),
+      ...[...w.remote.items.values()].map((item) => item.path),
+    ].filter((path) => path.includes(" moving "));
+
+  test("two notes swapping names here converge, edits included", async () => {
+    const w = await three();
+    await moveHere(w, "A.md", "tmp.md");
+    await moveHere(w, "B.md", "A.md");
+    await moveHere(w, "tmp.md", "B.md");
+    w.local.put("B.md", "a, edited after the swap");
+    const result = await settled(w);
+    expect(result.failed).toEqual([]);
+    expect(remotePaths(w.remote)).toEqual([
+      "A.md: b",
+      "B.md: a, edited after the swap",
+      "C.md: c",
+    ]);
+    expect(parked(w)).toEqual([]);
+  });
+
+  test("two notes swapping names in NOTE converge here", async () => {
+    const w = await three();
+    const a = w.remote.byPath("A.md")?.id ?? "";
+    const b = w.remote.byPath("B.md")?.id ?? "";
+    await w.remote.rename(a, "tmp.md");
+    await w.remote.rename(b, "A.md");
+    await w.remote.rename(a, "B.md");
+    w.engine.remoteChanged();
+    const result = await settled(w);
+    expect(result.failed).toEqual([]);
+    expect(localPaths(w.local)).toEqual(["A.md: b", "B.md: a", "C.md: c"]);
+    expect(parked(w)).toEqual([]);
+  });
+
+  test("three notes rotating names converge", async () => {
+    const w = await three();
+    await moveHere(w, "A.md", "tmp.md");
+    await moveHere(w, "C.md", "A.md");
+    await moveHere(w, "B.md", "C.md");
+    await moveHere(w, "tmp.md", "B.md");
+    const result = await settled(w);
+    expect(result.failed).toEqual([]);
+    expect(remotePaths(w.remote)).toEqual(["A.md: c", "B.md: a", "C.md: b"]);
+    expect(parked(w)).toEqual([]);
+  });
+
+  test("a chain of renames goes in order, never through a temporary name", async () => {
+    const w = await three();
+    await moveHere(w, "C.md", "D.md");
+    await moveHere(w, "B.md", "C.md");
+    await moveHere(w, "A.md", "B.md");
+    const renamed: string[] = [];
+    w.remote.beforeWrite = (id) => {
+      renamed.push(id);
+    };
+    const result = await settled(w);
+    expect(result.failed).toEqual([]);
+    expect(remotePaths(w.remote)).toEqual(["B.md: a", "C.md: b", "D.md: c"]);
+    expect(renamed.length).toBe(3);
+  });
+});
+
 describe("engine: mass deletions", () => {
   async function many(confirm: (deletions: Deletions) => Promise<boolean>) {
     const w = await setup({ confirm });
@@ -333,6 +422,17 @@ describe("engine: mass deletions", () => {
     await w.engine.run();
     expect(w.local.files.size).toBe(0);
     expect(w.local.trashed.length).toBe(12);
+  });
+
+  test("past fifty, wait for confirmation however large the vault", async () => {
+    const w = await setup({ confirm: async () => false });
+    for (let n = 0; n < 600; n++) w.remote.put(`n${n}`, `N${n}.md`, `${n}`);
+    await settled(w);
+    for (let n = 0; n < 51; n++) w.remote.items.delete(`n${n}`);
+    w.engine.remoteChanged();
+    await w.engine.run();
+    expect(w.asked).toEqual([{ local: 51, remote: 0 }]);
+    expect(w.local.files.size).toBe(600);
   });
 });
 

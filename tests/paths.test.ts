@@ -21,6 +21,20 @@ describe("which files sync", () => {
     expect(exclusion("Projects/Plan.md", ".obsidian")).toBeNull();
   });
 
+  test("scripts other plugins run never sync", () => {
+    for (const path of [
+      "views/table.js",
+      "Scripts/macro.MJS",
+      "lib.cjs",
+      "a.jsx",
+      "tool.py",
+      "run.sh",
+    ])
+      expect(exclusion(path, ".obsidian")).toBe("script");
+    expect(exclusion("notes/json.md", ".obsidian")).toBeNull();
+    expect(exclusion("data.json", ".obsidian")).toBeNull();
+  });
+
   test("names NOTE can't store stay out, as NOTE's own path rules decide", () => {
     expect(exclusion("a/../b.md", ".obsidian")).not.toBeNull();
     for (const path of [
@@ -55,6 +69,14 @@ describe("conflict copies", () => {
       "Projects/Plan conflict 0123abcd.md",
     );
     expect(conflictPath("Top.MDX", id)).toBe("Top conflict 0123abcd.mdx");
+  });
+
+  test("keep only a real extension last", () => {
+    expect(conflictPath("img/a.b.png", id)).toBe(
+      "img/a.b conflict 0123abcd.png",
+    );
+    expect(conflictPath("Makefile", id)).toBe("Makefile conflict 0123abcd");
+    expect(conflictPath("trailing.", id)).toBe("trailing. conflict 0123abcd");
   });
 
   test("shorten the name to fit NOTE's 255-byte limit", () => {

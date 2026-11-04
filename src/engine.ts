@@ -1,3 +1,4 @@
+import { movingPath } from "./conflicts";
 import { sha256 } from "./hash";
 import { exclusion, isNotePath, pathKey } from "./paths";
 import {
@@ -84,7 +85,6 @@ export interface RemoteVault {
 export interface SyncIndex {
   load(): Promise<Entry[]>;
   save(entries: Entry[]): Promise<void>;
-  clear(): Promise<void>;
 }
 export interface Deletions {
   local: number;
@@ -112,17 +112,19 @@ export interface EngineOptions {
    * Asked before a round deletes many notes at once, since a vault that
    * suddenly reads as empty looks exactly like everything deleted.
    */
-  confirmDeletions?(deletions: Deletions): Promise<boolean>;
+  confirmDeletions?: (deletions: Deletions) => Promise<boolean>;
   /**
    * Whether a write was refused because the item changed in NOTE since the
    * round read it; the round reads again and plans from there.
    */
-  stale?(error: unknown): boolean;
-  newId?(): string;
+  stale?: (error: unknown) => boolean;
+  newId?: () => string;
 }
 
 /** More deletions than this, and more than a tenth of the synced items, need confirming. */
 const MASS_DELETION = 10;
+/** More deletions than this need confirming, however large the vault. */
+const MASS_DELETION_CEILING = 50;
 /** NOTE imports files up to this size; a larger attachment stays on this device. */
 export const MAX_ATTACHMENT_BYTES = 32_000_000;
 const MAX_PASSES = 3;
@@ -137,6 +139,57 @@ const baseOf = (item: RemoteItem): RevisionBase | undefined =>
     : undefined;
 const isDeletion = (step: Step) =>
   step.kind === "delete-local" || step.kind === "delete-remote";
+/** Whether going from `from` to `to` leaves a path another item could take; a change of case doesn't. */
+const leaves = (from: string, to: string) => pathKey(from) !== pathKey(to);
+
+type Side = "local" | "remote";
+/**
+ * The paths each side's items are leaving this pass, by the id leaving each.
+ * A rename into one of them waits until its holder has left, and a cycle of
+ * renames, such as two notes swapping names, moves one item aside first.
+ */
+class Vacating {
+  private readonly sides: Record<Side, Map<string, string>> = {
+    local: new Map(),
+    remote: new Map(),
+  };
+
+  constructor(steps: readonly Step[]) {
+    for (const step of steps) {
+      if (step.kind === "delete-local")
+        this.leaving("local", step.local.path, step.id);
+      else if (step.kind === "delete-remote")
+        this.leaving("remote", step.remote.path, step.id);
+      else if (step.kind === "update") {
+        if (step.local && leaves(step.local.path, step.path))
+          this.leaving("local", step.local.path, step.id);
+        if (step.remote && leaves(step.remote.path, step.path))
+          this.leaving("remote", step.remote.path, step.id);
+      }
+    }
+  }
+
+  private leaving(side: Side, path: string, id: string) {
+    this.sides[side].set(pathKey(path), id);
+  }
+
+  /** The item still holding the path `step` moves into, on whichever side it moves. */
+  holder(step: Step): string | null {
+    if (step.kind !== "update") return null;
+    const key = pathKey(step.path);
+    for (const side of ["local", "remote"] as const) {
+      const item = step[side];
+      const holder = this.sides[side].get(key);
+      if (item && leaves(item.path, step.path) && holder && holder !== step.id)
+        return holder;
+    }
+    return null;
+  }
+
+  left(side: Side, path: string) {
+    this.sides[side].delete(pathKey(path));
+  }
+}
 
 /**
  * Two-way sync between the Obsidian vault and the NOTE vault, one round at a
@@ -154,6 +207,7 @@ export class SyncEngine {
   private approved = new Set<string>();
   private dirty = false;
   private stopped = false;
+  private vacating = new Vacating([]);
   private readonly newId: () => string;
 
   constructor(private readonly options: EngineOptions) {
@@ -272,18 +326,52 @@ export class SyncEngine {
       }
       if (!steps.length) break;
       const failures = result.failed.length;
+      this.vacating = new Vacating(steps);
+      const waiting: Step[] = [];
       for (const step of steps) {
         if (this.stopped) break;
-        await this.apply(step, result);
+        if (this.vacating.holder(step)) waiting.push(step);
+        else await this.apply(step, result);
       }
+      await this.applyWaiting(waiting, result);
       this.dirty = true;
       if (result.failed.length > failures) break;
     }
-    if (this.dirty) {
+    // A stopped engine was closed, unlinked or removed: its index may already be deleted, and must stay so.
+    if (this.dirty && !this.stopped) {
       this.dirty = false;
       await this.options.index.save([...this.entries.values()]);
     }
     return result;
+  }
+
+  /**
+   * Renames that waited for their new path: each goes once its holder left.
+   * When every one waits on another that is waiting too, they form a cycle,
+   * and one moves aside to a free name, which the next pass finishes. One
+   * whose holder couldn't leave waits for the next round.
+   */
+  private async applyWaiting(waiting: Step[], result: RoundResult) {
+    const inCycle = (step: Step) => {
+      const seen = new Set<Step>();
+      for (let current = step; !seen.has(current); ) {
+        seen.add(current);
+        const holder = this.vacating.holder(current);
+        const next = waiting.find((other) => other.id === holder);
+        if (!next) return false;
+        if (next === step) return true;
+        current = next;
+      }
+      return false;
+    };
+    while (waiting.length && !this.stopped) {
+      const free = waiting.findIndex((step) => !this.vacating.holder(step));
+      const cycle = waiting.findIndex(inCycle);
+      const index = free === -1 ? cycle : free;
+      if (index === -1) return;
+      const [step] = waiting.splice(index, 1);
+      if (step) await this.apply(step, result, free === -1);
+    }
   }
 
   /**
@@ -297,8 +385,9 @@ export class SyncEngine {
     const keyOf = (step: Step) => `${step.kind}:${step.id}`;
     const deletions = steps.filter(isDeletion);
     const massive =
-      deletions.length > MASS_DELETION &&
-      deletions.length > this.entries.size / 10;
+      deletions.length > MASS_DELETION_CEILING ||
+      (deletions.length > MASS_DELETION &&
+        deletions.length > this.entries.size / 10);
     if (!massive) {
       this.declined.clear();
       this.approved.clear();
@@ -441,19 +530,21 @@ export class SyncEngine {
       : this.options.local.readBinary(path);
   }
 
-  private async apply(step: Step, result: RoundResult) {
+  private async apply(step: Step, result: RoundResult, aside = false) {
     try {
       if (step.kind === "forget") this.entries.delete(step.id);
       else if (step.kind === "delete-remote") {
         await this.options.remote.remove(step.id, baseOf(step.remote));
         this.remoteChanged();
+        this.vacating.left("remote", step.remote.path);
         this.entries.delete(step.id);
       } else if (step.kind === "delete-local") {
-        if ((await this.unchanged(step.local)) && !this.stopped) {
+        if ((await this.unchanged(step.local)) !== null && !this.stopped) {
           await this.options.local.trash(step.local.path);
+          this.vacating.left("local", step.local.path);
           this.entries.delete(step.id);
         }
-      } else await this.update(step);
+      } else await this.update(step, aside);
       result.applied++;
     } catch (error) {
       this.remoteChanged();
@@ -499,9 +590,19 @@ export class SyncEngine {
         );
   }
 
-  private async update(step: Extract<Step, { kind: "update" }>) {
+  /**
+   * Writes one item's change. `aside` moves the side that renames to a free
+   * name beside `path` instead, and records it so the next plan finishes
+   * the rename from there.
+   */
+  private async update(step: Extract<Step, { kind: "update" }>, aside = false) {
     const { id, path, content, local, remote, copy } = step;
     const { local: files, remote: vault } = this.options;
+    const temporary = aside ? movingPath(path, this.newId) : null;
+    const remoteTo =
+      temporary && remote && remote.path !== path ? temporary : path;
+    const localTo =
+      temporary && local && local.path !== path ? temporary : path;
     let base: RevisionBase = {
       revision: remote?.revision ?? "",
       digest: remote?.digest ?? "",
@@ -511,12 +612,15 @@ export class SyncEngine {
     if (content === "local") {
       const body = local?.body;
       if (body === undefined) throw new Error("Push without local content");
-      base = await this.save(id, path, body, remote);
+      base = await this.save(id, remoteTo, body, remote);
       this.remoteChanged();
+      if (remote && remote.path !== path)
+        this.vacating.left("remote", remote.path);
       hash = local?.hash ?? "";
     } else if (remote && remote.path !== path) {
-      base = await vault.rename(id, path, baseOf(remote));
+      base = await vault.rename(id, remoteTo, baseOf(remote));
       this.remoteChanged();
+      this.vacating.left("remote", remote.path);
     }
     if (copy) {
       const body = local?.body;
@@ -535,20 +639,23 @@ export class SyncEngine {
     }
     if (this.stopped) throw new Error("Sync stopped");
     if (local && local.path !== path) {
-      if (!(await files.move(local.path, path)))
-        throw new Error(`Couldn't move ${local.path} to ${path}`);
+      if (!(await files.move(local.path, localTo)))
+        throw new Error(`Couldn't move ${local.path} to ${localTo}`);
+      this.vacating.left("local", local.path);
       // Recorded now, so a write that fails next still finds the file where it went.
       const entry = this.entries.get(id);
-      if (entry) entry.moved = path;
+      if (entry) entry.moved = localTo;
     }
     if (content === "remote" && remote) {
       const body = remote.body ?? (await vault.readAttachment(id));
       const written = local
-        ? await this.replaceAt(path, local, body)
-        : await files.create(path, body);
-      if (!written) throw new Error(`${path} changed while syncing`);
+        ? await this.replaceAt(localTo, local, body)
+        : await files.create(localTo, body);
+      if (!written) throw new Error(`${localTo} changed while syncing`);
     }
-    this.record({ id, path, hash, ...base });
+    // Parked aside, the agreed path is the free name, so the side still at `path` reads to the next plan as the rename left to finish.
+    const here = temporary && remoteTo === temporary ? { moved: path } : {};
+    this.record({ id, path: temporary ?? path, ...here, hash, ...base });
   }
 
   private async replaceAt(path: string, local: LocalItem, next: Body) {

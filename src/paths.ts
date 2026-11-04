@@ -34,18 +34,28 @@ export function isNoteSafeName(name: string): boolean {
   );
 }
 
-export type Exclusion = "config" | "hidden" | "unsafe-name";
+export type Exclusion = "config" | "hidden" | "script" | "unsafe-name";
+
+/**
+ * Scripts that other plugins run from the vault: Dataview views, Templater
+ * and QuickAdd user scripts and CustomJS run JavaScript, others run Python
+ * or shell files. Synced, they would let any linked device run code here,
+ * past NOTE's rule that another admin's code never runs by itself.
+ */
+const SCRIPT = /\.(?:[cm]?js|jsx|py|sh)$/iu;
 
 /**
  * Why a path stays out of sync in either direction, or null when it syncs.
  * Obsidian's config folder holds plugin code, so nothing is ever read from
- * or written into it, and neither is any hidden file or folder.
+ * or written into it, and neither is any hidden file or folder, nor a script
+ * another plugin could run.
  */
 export function exclusion(path: string, configDir: string): Exclusion | null {
   const segments = path.split("/");
   const config = pathKey(configDir.replace(/\/+$/u, ""));
   if (pathKey(segments[0] ?? "") === config) return "config";
   if (segments.some((segment) => segment.startsWith("."))) return "hidden";
+  if (SCRIPT.test(path)) return "script";
   if (
     path.length > MAX_PATH_LENGTH ||
     segments.length > MAX_DEPTH ||
