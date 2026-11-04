@@ -1,0 +1,381 @@
+import { type LinkedAccount, linkedAccount } from "./account";
+import type { Custody } from "./custody";
+import type {
+  DeviceOptions,
+  DeviceVault,
+  LinkOptions,
+  LinkPrompt,
+  NoteDeviceFetch,
+  TrustLoss,
+} from "./device";
+import {
+  type Deletions,
+  type LocalVault,
+  type RoundResult,
+  SyncEngine,
+  type SyncIndex,
+} from "./engine";
+
+/** The device client calls the controller makes. */
+export interface DeviceClient {
+  createDeviceSeed(): Uint8Array;
+  linkDevice(seed: Uint8Array, options: LinkOptions): Promise<unknown>;
+  openDeviceVault(
+    seed: Uint8Array,
+    options: DeviceOptions,
+  ): Promise<DeviceVault>;
+  /** The status the device's sync reports once it lost access and wiped its keys. */
+  locked: string;
+  /** Whether a status means the device's last sync read the vault, so its local copy is current. */
+  pulled(status: string): boolean;
+}
+
+export type Phase =
+  | { kind: "unlinked" }
+  | { kind: "linking"; prompt?: LinkPrompt }
+  | { kind: "confirm"; account: LinkedAccount }
+  | { kind: "opening" }
+  | { kind: "open"; status: string }
+  | { kind: "removed"; message: string }
+  | { kind: "stopped"; message: string };
+
+export type RemovalReason = "removed" | "revoked" | "unverified";
+export const REMOVED: Record<RemovalReason, string> = {
+  removed:
+    "This vault was removed from your NOTE notepad's access. Link it again to keep syncing.",
+  revoked: "Flow ID unlinked this vault. Link it again to keep syncing.",
+  unverified:
+    "This vault's link couldn't be verified. Link it again, and remove the unverified entry under Access in NOTE.",
+};
+export const STRANDED =
+  "NOTE's key changed while edits from this vault were still waiting to sync. Nothing is overwritten this time: where NOTE has different text, this vault's is kept as a conflict copy beside it.";
+export const LOCKED_ELSEWHERE =
+  "Another Obsidian vault on this device is syncing this NOTE account. Close it or unlink it there first.";
+
+export interface ControllerOptions {
+  custody: Custody;
+  device: DeviceClient;
+  /** Flow ID's origin. */
+  host: string;
+  fetch: NoteDeviceFetch;
+  local: LocalVault;
+  configDir: string;
+  /** The index for one NOTE vault, so relinking to another vault never reuses it. */
+  indexFor(did: string, vault: string): SyncIndex;
+  /**
+   * Holds `name` for as long as the vault is open, across every window and
+   * vault of this app, or answers null when another holder has it.
+   */
+  hold(name: string): Promise<(() => void) | null>;
+  /** Deletes the device client's local database for this account's vault. */
+  forgetLocalDatabase(did: string, vault: string): Promise<void>;
+  confirmDeletions(deletions: Deletions): Promise<boolean>;
+  onChange(): void;
+  onTrustLoss(loss: TrustLoss): void;
+  /** Tells the person something sync did that they didn't ask for. */
+  notify(message: string): void;
+}
+
+const LOCAL_DEBOUNCE_MS = 1_500;
+const REMOTE_DEBOUNCE_MS = 500;
+const RETRY_MS = 30_000;
+
+/**
+ * Links, opens and syncs one Obsidian vault with its NOTE vault, and owns the
+ * only open device vault, so a single device transport ever refreshes the
+ * stored tokens. Nothing syncs until the person confirmed the account the
+ * link bound, no round runs until the device has read the vault once since
+ * it opened, and everything stops when the device loses access.
+ */
+export class SyncController {
+  phase: Phase = { kind: "unlinked" };
+  lastRound: RoundResult | null = null;
+  private vault: DeviceVault | null = null;
+  private engine: SyncEngine | null = null;
+  private release: (() => void) | null = null;
+  private unsubscribe: (() => void)[] = [];
+  private timer: ReturnType<typeof setTimeout> | undefined;
+  private opening: Promise<void> | null = null;
+  /** Bumped by every `close`, so work started before it notices and stops. */
+  private generation = 0;
+  private ready = false;
+  private linking = false;
+
+  constructor(private readonly options: ControllerOptions) {}
+
+  /** The account the person confirmed, while linked. */
+  account(): LinkedAccount | null {
+    return this.options.custody.account();
+  }
+
+  private set(phase: Phase) {
+    this.phase = phase;
+    this.options.onChange();
+  }
+
+  private live(generation: number) {
+    return generation === this.generation;
+  }
+
+  /** Opens the linked vault, if there is one the person confirmed. */
+  async start() {
+    if (this.linking) return;
+    const generation = this.generation;
+    try {
+      const { custody } = this.options;
+      const credentials = await custody.credentials.read();
+      if (!this.live(generation)) return;
+      if (!custody.seed() || !credentials)
+        return this.set({ kind: "unlinked" });
+      if (custody.account()?.did !== credentials.did) {
+        const account = await linkedAccount(
+          credentials.did,
+          this.options.fetch,
+        );
+        if (this.live(generation)) this.set({ kind: "confirm", account });
+        return;
+      }
+      await this.open();
+    } catch (error) {
+      if (!this.live(generation)) return;
+      this.close();
+      this.set({ kind: "stopped", message: messageOf(error) });
+    }
+  }
+
+  /**
+   * Links this vault as a new device: shows the prompt through the phase,
+   * waits for approval in the browser, then names the account it was bound
+   * to. Nothing syncs until `confirm`.
+   */
+  async link(label: string, signal: AbortSignal): Promise<LinkedAccount> {
+    if (this.linking || this.vault)
+      throw new Error("This vault is already linked.");
+    const { custody, device } = this.options;
+    this.close();
+    this.linking = true;
+    custody.wipe();
+    const seed = device.createDeviceSeed();
+    custody.saveSeed(seed);
+    this.set({ kind: "linking" });
+    try {
+      await device.linkDevice(seed, {
+        ...this.deviceOptions(),
+        label,
+        signal,
+        onPrompt: (prompt) => this.set({ kind: "linking", prompt }),
+      });
+      const credentials = await custody.credentials.read();
+      if (!credentials) throw new Error("Linking stored no credentials.");
+      const account = await linkedAccount(credentials.did, this.options.fetch);
+      this.set({ kind: "confirm", account });
+      return account;
+    } catch (error) {
+      custody.wipe();
+      if (this.phase.kind !== "removed") this.set({ kind: "unlinked" });
+      throw error;
+    } finally {
+      this.linking = false;
+      seed.fill(0);
+    }
+  }
+
+  /** The person recognised the account: remember it and start syncing. */
+  async confirm() {
+    if (this.phase.kind !== "confirm") return;
+    this.options.custody.confirmAccount(this.phase.account);
+    await this.open();
+  }
+
+  /** Stops syncing and forgets the seed, the tokens, the sync index and the device's local database; the files stay. */
+  async unlink() {
+    await this.forget();
+    this.set({ kind: "unlinked" });
+  }
+
+  async syncNow() {
+    if (this.phase.kind === "stopped") return this.start();
+    const { vault, engine } = this;
+    if (!vault || !engine) return;
+    engine.reconsiderDeletions();
+    engine.remoteChanged();
+    await vault.sync().catch(() => {});
+    await this.round();
+    // The round's writes would sync on their own; this sends them now.
+    await vault.sync().catch(() => {});
+  }
+
+  localChanged() {
+    this.schedule(LOCAL_DEBOUNCE_MS);
+  }
+
+  renamed(from: string, to: string) {
+    this.engine?.renamed(from, to);
+    this.schedule(LOCAL_DEBOUNCE_MS);
+  }
+
+  /** Closes the vault and stops any round or open in flight; unsynced writes wait in the local database. */
+  close() {
+    this.generation++;
+    this.ready = false;
+    clearTimeout(this.timer);
+    for (const unsubscribe of this.unsubscribe.splice(0)) unsubscribe();
+    this.engine?.stop();
+    this.vault?.stop();
+    this.vault = null;
+    this.engine = null;
+    this.release?.();
+    this.release = null;
+  }
+
+  /**
+   * Wipes the keys and drops the sync index, whose base the device's database
+   * no longer backs. The database goes too, unless another vault on this
+   * device holds the account: the device client names it by account and
+   * vault only, so it is that vault's database as well.
+   */
+  private async forget() {
+    const { custody, hold, indexFor, forgetLocalDatabase } = this.options;
+    const credentials = await custody.credentials.read();
+    const checkpoint = await custody.checkpoints.read();
+    this.close();
+    custody.wipe();
+    if (!credentials || !checkpoint) return;
+    const { did } = credentials;
+    await indexFor(did, checkpoint.vault)
+      .clear()
+      .catch(() => {});
+    const release = await hold(`flow-note:${did}`);
+    if (!release) return;
+    try {
+      await forgetLocalDatabase(did, checkpoint.vault);
+    } catch {
+      // A database another window still holds open is left for the next unlink.
+    } finally {
+      release();
+    }
+  }
+
+  private deviceOptions(): DeviceOptions {
+    const { custody, host, fetch } = this.options;
+    return {
+      host,
+      fetch,
+      ...custody.scope(),
+      onRemoved: async (reason) => {
+        await this.forget();
+        this.set({ kind: "removed", message: REMOVED[reason] });
+      },
+    };
+  }
+
+  private open(): Promise<void> {
+    this.opening ??= this.openOnce().finally(() => {
+      this.opening = null;
+    });
+    return this.opening;
+  }
+
+  private async openOnce() {
+    const { custody, device } = this.options;
+    this.close();
+    const generation = this.generation;
+    const seed = custody.seed();
+    let vault: DeviceVault | undefined;
+    try {
+      const credentials = await custody.credentials.read();
+      if (!this.live(generation)) return;
+      if (!seed || !credentials) return this.set({ kind: "unlinked" });
+      if (custody.account()?.did !== credentials.did) return void this.start();
+      this.set({ kind: "opening" });
+      const release = await this.options.hold(`flow-note:${credentials.did}`);
+      if (!this.live(generation)) return release?.();
+      if (!release)
+        return this.set({ kind: "stopped", message: LOCKED_ELSEWHERE });
+      this.release = release;
+      vault = await device.openDeviceVault(seed, this.deviceOptions());
+      const checkpoint = await custody.checkpoints.read();
+      if (!checkpoint) throw new Error("This vault's pin is missing.");
+      const engine = new SyncEngine({
+        local: this.options.local,
+        remote: vault,
+        index: this.options.indexFor(credentials.did, checkpoint.vault),
+        configDir: this.options.configDir,
+        confirmDeletions: this.options.confirmDeletions,
+      });
+      await engine.load();
+      if (!this.live(generation)) return vault.stop();
+      if (vault.stranded) {
+        engine.rebase();
+        this.options.notify(STRANDED);
+      }
+      this.vault = vault;
+      this.engine = engine;
+      this.unsubscribe.push(
+        vault.subscribe((status) => this.statusChanged(status)),
+        vault.subscribeChanges(() => {
+          this.engine?.remoteChanged();
+          this.schedule(REMOTE_DEBOUNCE_MS);
+        }),
+        vault.subscribeTrustLoss((loss) => this.options.onTrustLoss(loss)),
+      );
+      if (this.phase.kind === "opening")
+        this.set({ kind: "open", status: "Connecting" });
+      // Pull first, so edits made here while closed meet the remote's as a conflict copy beside the note.
+      void this.syncNow();
+    } catch (error) {
+      if (!this.live(generation)) return vault?.stop();
+      this.close();
+      vault?.stop();
+      if (this.phase.kind !== "removed")
+        this.set({ kind: "stopped", message: messageOf(error) });
+    } finally {
+      seed?.fill(0);
+    }
+  }
+
+  private statusChanged(status: string) {
+    if (status === this.options.device.locked) {
+      // Locked means access changed and the keys are gone: opening again learns whether the device was removed.
+      this.close();
+      void this.open();
+      return;
+    }
+    if (!this.ready && this.options.device.pulled(status)) {
+      this.ready = true;
+      this.schedule(0);
+    }
+    if (this.phase.kind === "open") this.set({ kind: "open", status });
+  }
+
+  private schedule(delay: number) {
+    if (!this.engine) return;
+    clearTimeout(this.timer);
+    this.timer = setTimeout(() => void this.round(), delay);
+  }
+
+  private async round() {
+    const { engine, vault, generation } = this;
+    if (!engine || !vault || !this.ready) return;
+    try {
+      this.lastRound = await engine.run();
+      if (!this.live(generation)) return;
+      if (this.lastRound.applied) void vault.sync().catch(() => {});
+      if (this.lastRound.failed.length) this.schedule(RETRY_MS);
+    } catch (error) {
+      if (!this.live(generation)) return;
+      this.lastRound = {
+        applied: 0,
+        failed: [{ path: "", error: messageOf(error) }],
+        attachments: 0,
+        unsyncable: [],
+        held: { local: 0, remote: 0 },
+      };
+      this.schedule(RETRY_MS);
+    }
+    this.options.onChange();
+  }
+}
+
+const messageOf = (error: unknown) =>
+  error instanceof Error ? error.message : String(error);

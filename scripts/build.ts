@@ -29,6 +29,8 @@ const result = await Bun.build({
   external,
   minify: production,
   sourcemap: production ? "none" : "inline",
+  // Obsidian loads main.js as CommonJS, where `import.meta` is a syntax error; no local path leaks in its place.
+  define: { "import.meta.url": JSON.stringify("app://obsidian.md/main.js") },
   banner:
     "/* Bundled from https://github.com/flow-industries/sync; read the source there. */",
 });

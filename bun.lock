@@ -4,10 +4,14 @@
   "workspaces": {
     "": {
       "name": "flow-note-sync",
+      "dependencies": {
+        "@flow-industries/seal": "link:@flow-industries/seal",
+      },
       "devDependencies": {
         "@biomejs/biome": "2.5.8",
         "@flow-industries/lint": "0.3.1",
         "@types/bun": "1.3.14",
+        "fake-indexeddb": "6.2.4",
         "obsidian": "1.14.4",
         "typescript": "5.9.3",
       },
@@ -38,6 +42,8 @@
 
     "@flow-industries/lint": ["@flow-industries/lint@0.3.1", "", {}, "sha512-oKTw7fMCZBlshRixumpXrUJUmbJx3HqiGs72F43d920yy1fCtOuAjlnbY8SXBZZ7TnEibuYY2FVjAZcQSg6COQ=="],
 
+    "@flow-industries/seal": ["@flow-industries/seal@link:@flow-industries/seal", {}],
+
     "@marijn/find-cluster-break": ["@marijn/find-cluster-break@1.0.4", "", {}, "sha512-Wy0V7+SGUjnF9/TkiM1hKVDPj7jKXduPNboMVtHTA8dySMURWqfg/JZ9E2Sq8JgSJmkl7k7Qe9FLeMSrSraWmQ=="],
 
     "@types/bun": ["@types/bun@1.3.14", "", { "dependencies": { "bun-types": "1.3.14" } }, "sha512-h1hFqFVcvAvD9j9K7ZW7vd82aSA+rTdznZa+5bwvCwqSB1jmmfLcbIWhOLx1/+boy/xmjgCs/OMUL8hRJSmnPw=="],
@@ -53,6 +59,8 @@
     "bun-types": ["bun-types@1.3.14", "", { "dependencies": { "@types/node": "*" } }, "sha512-4N0ig0fEomHt5R0KCFWjovxow98rIoRwKolrYdCcknNwMekCXRnWEUvgu5soYV8QXtVsrUD8B95MBOZGPvr6KQ=="],
 
     "crelt": ["crelt@1.0.7", "", {}, "sha512-aK6BbWfhf4U/wCcLHKPJl/xa6VkVstRaPywWtMKGwuOLc/wZTyQYuoxgvZnNsBvv7Kg3YTBQYYBCggcviQczuA=="],
+
+    "fake-indexeddb": ["fake-indexeddb@6.2.4", "", {}, "sha512-INKeIKEtSViN4yVtEWEUqbsqmaIy7Ls+MfU0yxQVXg67pOJ/sH1ZxcVrP8XrKULUFohcPD9gnmym+qBfEybACw=="],
 
     "moment": ["moment@2.31.0", "", {}, "sha512-0acOTfMiWOheYS4eoWb80yYMb/JLvVv9SHbs2PehaDzfUG0Bw855SKyk0IKTnPGa5+U2bmi3W68l1+sGLX/pvw=="],
 
