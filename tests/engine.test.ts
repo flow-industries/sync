@@ -156,7 +156,7 @@ describe("engine: after the first sync", () => {
   test("carries renames both ways", async () => {
     const w = await synced();
     await w.local.move("A.md", "Moved/A2.md");
-    w.engine.renamed("A.md", "Moved/A2.md");
+    w.engine.renamed("A.md", "Moved/A2.md", true);
     const b = w.remote.byPath("B.md");
     await w.remote.rename(b?.id ?? "", "Elsewhere/B.md");
     w.engine.remoteChanged();
@@ -174,15 +174,39 @@ describe("engine: after the first sync", () => {
   test("moves NOTE's copy without repairing links, as Obsidian already updated them", async () => {
     const w = await synced();
     await w.local.move("A.md", "Moved/A2.md");
-    w.engine.renamed("A.md", "Moved/A2.md");
+    w.engine.renamed("A.md", "Moved/A2.md", true);
     await settled(w);
     w.local.put("Moved/A2.md", "one, edited");
     await w.local.move("Moved/A2.md", "A3.md");
-    w.engine.renamed("Moved/A2.md", "A3.md");
+    w.engine.renamed("Moved/A2.md", "A3.md", true);
     w.remote.options = [];
     await settled(w);
     expect(remotePaths(w.remote)).toEqual(["A3.md: one, edited", "B.md: two"]);
     expect(w.remote.options).toEqual([{ current: true, repairLinks: false }]);
+  });
+
+  test("has NOTE repair links only where Obsidian didn't update them", async () => {
+    const repairs = async (rename: (w: Setup) => Promise<void>) => {
+      const w = await synced();
+      await rename(w);
+      w.remote.options = [];
+      await settled(w);
+      return w.remote.options;
+    };
+    const updatedHere = await repairs(async (w) => {
+      await w.local.move("A.md", "Z.md");
+      w.engine.renamed("A.md", "Z.md", true);
+    });
+    const updatesOff = await repairs(async (w) => {
+      await w.local.move("A.md", "Z.md");
+      w.engine.renamed("A.md", "Z.md", false);
+    });
+    const unseen = await repairs(async (w) => {
+      await w.local.move("A.md", "Z.md");
+    });
+    expect(updatedHere).toEqual([{ repairLinks: false }]);
+    expect(updatesOff).toEqual([{ repairLinks: true }]);
+    expect(unseen).toEqual([{ repairLinks: true }]);
   });
 
   test("carries a folder rename Obsidian reported once", async () => {
@@ -192,7 +216,7 @@ describe("engine: after the first sync", () => {
     await settled(w);
     await w.local.move("Old/x.md", "New/x.md");
     await w.local.move("Old/Sub/y.md", "New/Sub/y.md");
-    w.engine.renamed("Old", "New");
+    w.engine.renamed("Old", "New", true);
     await settled(w);
     expect(remotePaths(w.remote)).toEqual(["New/Sub/y.md: y", "New/x.md: x"]);
   });
@@ -295,7 +319,7 @@ describe("engine: after the first sync", () => {
     const w = await synced();
     const a = w.remote.byPath("A.md")?.id ?? "";
     await w.local.move("A.md", "Moved.md");
-    w.engine.renamed("A.md", "Moved.md");
+    w.engine.renamed("A.md", "Moved.md", true);
     w.local.put("Moved.md", "local edit");
     w.remote.put(a, "A.md", "remote edit");
     w.engine.remoteChanged();
@@ -342,7 +366,7 @@ describe("engine: renames into names other items are leaving", () => {
   }
   const moveHere = async (w: Setup, from: string, to: string) => {
     await w.local.move(from, to);
-    w.engine.renamed(from, to);
+    w.engine.renamed(from, to, true);
   };
   const parked = (w: Setup) =>
     [
@@ -425,7 +449,7 @@ describe("engine: renames into names other items are leaving", () => {
           ["tmp.md", "B.md"],
         ] as const) {
           await move(from, to);
-          quitting.renamed(from, to);
+          quitting.renamed(from, to, true);
         }
       } else {
         const a = w.remote.byPath("A.md")?.id ?? "";
@@ -542,7 +566,7 @@ describe("engine: collisions", () => {
     await settled(w);
     await w.local.trash("B.md");
     await w.local.move("A.md", "B.md");
-    w.engine.renamed("A.md", "B.md");
+    w.engine.renamed("A.md", "B.md", true);
     await settled(w);
     expect(remotePaths(w.remote)).toEqual(["B.md: a"]);
   });

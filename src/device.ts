@@ -19,6 +19,7 @@ export {
   type NoteDeviceFetch,
   openDeviceVault,
   SYNC_LOCKED,
+  SYNCED,
   type SyncListener,
   type TrustLoss,
 } from "@flow-industries/seal";

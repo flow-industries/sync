@@ -144,9 +144,22 @@ const deletionsOf = (steps: readonly Step[]): Deletions => ({
   local: steps.filter((step) => step.kind === "delete-local").length,
   remote: steps.filter((step) => step.kind === "delete-remote").length,
 });
-/** How the engine writes to NOTE: compare-and-swap, and moves that leave links as Obsidian wrote them. */
-const WRITE = { current: true, repairLinks: false } as const;
-const MOVE = { repairLinks: false } as const;
+/**
+ * Which links NOTE repairs when it follows a move made here. `all` when
+ * Obsidian didn't update them: it didn't see the rename (made outside it,
+ * or while it was closed), or doesn't update links. `unindexed` when it
+ * did, which leaves only notes Obsidian never indexes, such as `.mdx`.
+ */
+export type LinkRepair = "all" | "unindexed";
+/**
+ * The device client's `repairLinks` for each. It takes only a yes or no for
+ * now, so `unindexed` repairs nothing: a second repair of what Obsidian
+ * already updated re-targets links in chains and swaps.
+ */
+const REPAIR_LINKS: Record<LinkRepair, boolean> = {
+  all: true,
+  unindexed: false,
+};
 const baseOf = (item: RemoteItem): RevisionBase | undefined =>
   item.revision && item.digest
     ? { revision: item.revision, digest: item.digest }
@@ -239,8 +252,12 @@ export class SyncEngine {
     this.cached = null;
   }
 
-  /** A file or folder Obsidian renamed, so the round carries the rename instead of a delete and a create. */
-  renamed(from: string, to: string) {
+  /**
+   * A file or folder Obsidian renamed, so the round carries the rename
+   * instead of a delete and a create. `linksUpdated`: Obsidian rewrote the
+   * links to it as it renamed.
+   */
+  renamed(from: string, to: string, linksUpdated: boolean) {
     const prefix = `${from}/`;
     for (const entry of this.entries.values()) {
       const current = entry.moved ?? entry.path;
@@ -251,8 +268,10 @@ export class SyncEngine {
             ? `${to}/${current.slice(prefix.length)}`
             : null;
       if (next === null) continue;
-      if (next === entry.path) delete entry.moved;
-      else entry.moved = next;
+      if (next === entry.path) {
+        delete entry.moved;
+        delete entry.linksUpdated;
+      } else Object.assign(entry, { moved: next, linksUpdated });
     }
   }
 
@@ -592,15 +611,27 @@ export class SyncEngine {
     path: string,
     body: Body,
     base?: Partial<RevisionBase>,
+    repair: LinkRepair = "all",
   ) {
     const { remote } = this.options;
     const { revision, digest } = base ?? {};
+    const options = { current: true, repairLinks: REPAIR_LINKS[repair] };
     return typeof body === "string"
-      ? remote.saveNote({ id, path, source: body, revision, digest }, WRITE)
+      ? remote.saveNote({ id, path, source: body, revision, digest }, options)
       : remote.saveAttachment(
           { id, path, bytes: body, revision, digest },
-          WRITE,
+          options,
         );
+  }
+
+  /** How NOTE repairs links when it follows this item's move here, by what Obsidian did as it moved. */
+  private linkRepair(id: string, local: LocalItem | undefined): LinkRepair {
+    const entry = this.entries.get(id);
+    const seen =
+      entry?.moved !== undefined &&
+      local !== undefined &&
+      pathKey(entry.moved) === pathKey(local.path);
+    return seen && entry?.linksUpdated ? "unindexed" : "all";
   }
 
   /**
@@ -612,6 +643,9 @@ export class SyncEngine {
     const { id, path, content, local, remote, copy } = step;
     const { local: files, remote: vault } = this.options;
     const temporary = aside ? movingPath(path, this.newId) : null;
+    const repair = this.linkRepair(id, local);
+    // A parked item finishes its move next pass, with the same repair.
+    const parkedLinks = this.entries.get(id)?.linksUpdated;
     const remoteTo =
       temporary && remote && remote.path !== path ? temporary : path;
     const localTo =
@@ -625,13 +659,15 @@ export class SyncEngine {
     if (content === "local") {
       const body = local?.body;
       if (body === undefined) throw new Error("Push without local content");
-      base = await this.save(id, remoteTo, body, remote);
+      base = await this.save(id, remoteTo, body, remote, repair);
       this.remoteChanged();
       if (remote && remote.path !== path)
         this.vacating.left("remote", remote.path);
       hash = local?.hash ?? "";
     } else if (remote && remote.path !== path) {
-      base = await vault.rename(id, remoteTo, baseOf(remote), MOVE);
+      base = await vault.rename(id, remoteTo, baseOf(remote), {
+        repairLinks: REPAIR_LINKS[repair],
+      });
       this.remoteChanged();
       this.vacating.left("remote", remote.path);
     }
@@ -674,7 +710,10 @@ export class SyncEngine {
       if (!written) throw new Error(`${localTo} changed while syncing`);
     }
     // Parked aside, the agreed path is the free name, so the side still at `path` reads to the next plan as the rename left to finish.
-    const here = temporary && remoteTo === temporary ? { moved: path } : {};
+    const here =
+      temporary && remoteTo === temporary
+        ? { moved: path, linksUpdated: parkedLinks }
+        : {};
     this.record({ id, path: temporary ?? path, ...here, hash, ...base });
   }
 

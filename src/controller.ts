@@ -27,6 +27,8 @@ export interface DeviceClient {
   ) => Promise<DeviceVault>;
   /** The status the device's sync reports once it lost access and wiped its keys. */
   locked: string;
+  /** The status a sync that went through reports. */
+  synced: string;
   /** Whether a write was refused because the item changed since it was read (`NoteChangedError`). */
   stale: (error: unknown) => boolean;
 }
@@ -65,6 +67,8 @@ export interface ControllerOptions {
   fetch: NoteDeviceFetch;
   local: LocalVault;
   configDir: string;
+  /** Whether Obsidian rewrites links as it renames a file ("Automatically update internal links"). */
+  updatesLinks: () => boolean;
   /** The index of one linked device: a new link never plans against another device's base. */
   indexFor: (key: IndexKey) => SyncIndex;
   /** Deletes every index this Obsidian vault holds, for every device it was linked as. */
@@ -123,7 +127,10 @@ export class SyncController {
   private generation = 0;
   private ready = false;
   private linking = false;
-  private pullRetry: ReturnType<typeof setTimeout> | undefined;
+  /** The read in flight, so the statuses its own sync publishes don't start another. */
+  private pulling: Promise<void> | null = null;
+  /** An open still unlocking the vault, which a close must stop too before the lock goes. */
+  private unlocking: Promise<DeviceVault> | null = null;
   /** Settles once the last closed device has stopped: nothing of it touches its database or the PDS. */
   private stopped: Promise<void> = Promise.resolve();
   /** Settles once the last closed device's lock is released. */
@@ -261,6 +268,7 @@ export class SyncController {
     engine.reconsiderDeletions();
     engine.remoteChanged();
     await this.pull(vault, generation);
+    if (!this.ready) return;
     await this.round();
     // The round's writes would sync on their own; this sends them now.
     await vault.sync().catch(() => {});
@@ -269,15 +277,24 @@ export class SyncController {
   /**
    * Syncs, and opens the gate for rounds once a sync has read the vault
    * from the PDS. Until one has, the device's copy may be empty or old, and
-   * a round would read that as everything deleted, so it tries again later.
+   * a round would read that as everything deleted. The device keeps syncing
+   * on its own schedule, backing off when refused; `statusChanged` asks
+   * again once one of those syncs goes through.
    */
-  private async pull(vault: DeviceVault, generation: number) {
-    const report = await vault.sync().catch(() => ({ read: false }));
-    if (!this.live(generation)) return;
-    clearTimeout(this.pullRetry);
-    if (report.read) this.ready = true;
-    else if (!this.ready)
-      this.pullRetry = setTimeout(() => void this.syncNow(), RETRY_MS);
+  private pull(vault: DeviceVault, generation: number): Promise<void> {
+    if (this.pulling) return this.pulling;
+    // Started a tick later, so the statuses this sync publishes already see it running.
+    const pulling: Promise<void> = Promise.resolve()
+      .then(() => vault.sync())
+      .catch(() => ({ read: false }))
+      .then((report) => {
+        if (this.live(generation) && report.read) this.ready = true;
+      })
+      .finally(() => {
+        if (this.pulling === pulling) this.pulling = null;
+      });
+    this.pulling = pulling;
+    return pulling;
   }
 
   localChanged() {
@@ -285,7 +302,7 @@ export class SyncController {
   }
 
   renamed(from: string, to: string) {
-    this.engine?.renamed(from, to);
+    this.engine?.renamed(from, to, this.options.updatesLinks());
     this.schedule(LOCAL_DEBOUNCE_MS);
   }
 
@@ -299,12 +316,19 @@ export class SyncController {
     this.generation++;
     this.ready = false;
     clearTimeout(this.timer);
-    clearTimeout(this.pullRetry);
     for (const unsubscribe of this.unsubscribe.splice(0)) unsubscribe();
     this.engine?.stop();
-    if (this.vault) {
+    // An open still unlocking holds a transport too, maybe mid token refresh: it stops once it settles.
+    const stopping =
+      this.vault?.stop() ??
+      this.unlocking?.then(
+        (vault) => vault.stop(),
+        () => {},
+      );
+    this.unlocking = null;
+    this.pulling = null;
+    if (stopping) {
       const earlier = this.stopped;
-      const stopping = this.vault.stop();
       this.stopped = within(Promise.all([earlier, stopping]), DRAIN_MS);
     }
     this.vault = null;
@@ -345,6 +369,8 @@ export class SyncController {
       fetch,
       ...custody.scope(),
       onRemoved: async (reason) => {
+        // Called from inside the open that found the removal: waiting for that open would wait on itself, and its keys go now anyway.
+        this.unlocking = null;
         await this.forget();
         this.set({ kind: "removed", message: REMOVED[reason] });
       },
@@ -376,8 +402,11 @@ export class SyncController {
       if (!release)
         return this.set({ kind: "stopped", message: LOCKED_ELSEWHERE });
       this.release = release;
-      const vault = await device.openDeviceVault(seed, this.deviceOptions());
-      if (!this.live(generation)) return void vault.stop();
+      const unlocking = device.openDeviceVault(seed, this.deviceOptions());
+      this.unlocking = unlocking;
+      const vault = await unlocking;
+      if (!this.live(generation)) return;
+      this.unlocking = null;
       // Held from here, so any close stops it before the lock goes.
       this.vault = vault;
       const checkpoint = await custody.checkpoints.read();
@@ -437,6 +466,9 @@ export class SyncController {
       void this.open();
       return;
     }
+    // The device syncs on its own schedule, backing off when refused: once one of its syncs goes through, one sync of ours learns whether it read the vault.
+    if (!this.ready && !this.pulling && status === this.options.device.synced)
+      void this.syncNow();
     if (this.phase.kind === "open") this.set({ kind: "open", status });
   }
 

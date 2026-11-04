@@ -46,7 +46,15 @@ function deviceVault(
   stopping: Promise<void> = Promise.resolve(),
 ) {
   const listeners = new Set<SyncListener>();
-  const state = { stopped: false, pull: true };
+  const state = {
+    stopped: false,
+    pull: true,
+    syncs: 0,
+    /** A status from one of the device's own syncs, as its schedule runs them. */
+    emit: (status: Parameters<SyncListener>[0]) => {
+      for (const listener of listeners) void listener(status);
+    },
+  };
   const vault = {
     read: () => remote.read().then((view) => ({ ...view, folders: [] })),
     saveNote: (note, options) => remote.saveNote(note, options),
@@ -63,6 +71,7 @@ function deviceVault(
     remove: (id, base) => remote.remove(id, base),
     compose: async () => ({ selectedId: "" }),
     sync: async () => {
+      state.syncs++;
       for (const listener of listeners)
         await listener(state.pull ? SYNCED : SYNC_PENDING);
       return { read: state.pull };
@@ -118,12 +127,14 @@ async function harness(
         return device.vault;
       },
       locked: "Locked",
+      synced: SYNCED,
       stale: isStale,
     },
     host: "https://id.example",
     fetch: async () => new Response(null, { status: 404 }),
     local,
     configDir: ".obsidian",
+    updatesLinks: () => true,
     indexFor: () => index,
     forgetIndexes: async () => index.clear(),
     hold: options.hold ?? (async () => (options.held ? null : () => {})),
@@ -179,9 +190,11 @@ describe("controller", () => {
       h.local.put("Here.md", "local");
       const starting = h.controller.start();
       await Bun.sleep(0);
-      if (interrupt === "close") h.controller.close();
-      else await h.controller.unlink();
+      // Unlink deletes the device's databases only once the open it interrupted settled and stopped.
+      const interrupting =
+        interrupt === "close" ? h.controller.close() : h.controller.unlink();
       opened.resolve();
+      await interrupting;
       await starting;
       await Bun.sleep(5);
       expect(h.controller.phase.kind).not.toBe("open");
@@ -286,6 +299,49 @@ describe("controller", () => {
     await h.controller.unlink();
     expect(h.controller.phase.kind).toBe("unlinked");
     expect(h.controller.stored()).toBe(false);
+  });
+
+  test("while the vault is unread, it syncs once and then follows the device's own schedule", async () => {
+    const h = await harness();
+    h.device.state.pull = false;
+    h.local.put("Here.md", "local");
+    await h.controller.start();
+    await Bun.sleep(10);
+    expect(h.device.state.syncs).toBe(1);
+    // The device's own retries, refused or backing off, start nothing here.
+    h.device.state.emit(SYNC_PENDING);
+    await Bun.sleep(10);
+    expect(h.device.state.syncs).toBe(1);
+    // One of them goes through: a sync of ours learns it read the vault, and the round runs.
+    h.device.state.pull = true;
+    h.device.state.emit(SYNCED);
+    await Bun.sleep(10);
+    expect(h.remote.text("Here.md")).toBe("local");
+    h.controller.close();
+  });
+
+  test("a close while the vault still opens keeps the lock until that open settles and stops", async () => {
+    const opened = Promise.withResolvers<void>();
+    let held = false;
+    const h = await harness({
+      opened: opened.promise,
+      hold: async () => {
+        held = true;
+        return () => {
+          held = false;
+        };
+      },
+    });
+    const starting = h.controller.start();
+    await Bun.sleep(5);
+    h.controller.close();
+    await Bun.sleep(50);
+    expect(held).toBe(true);
+    opened.resolve();
+    await starting;
+    await Bun.sleep(5);
+    expect(h.device.state.stopped).toBe(true);
+    expect(held).toBe(false);
   });
 
   test("a stop or a removal is told once in a notice, since mobile has no status bar", async () => {
@@ -404,12 +460,14 @@ function linkedVault(local: MemoryVault, opens: (() => DeviceVault)[]) {
         return open();
       },
       locked: "Locked",
+      synced: SYNCED,
       stale: isStale,
     },
     host: "https://id.example",
     fetch: async () => new Response(null, { status: 404 }),
     local,
     configDir: ".obsidian",
+    updatesLinks: () => true,
     indexFor: (...key: unknown[]) => {
       const name = JSON.stringify(key);
       const index = indexes.get(name) ?? new MemoryIndex();

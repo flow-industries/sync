@@ -171,3 +171,15 @@ export function defaultLabel(): string {
             : "this device";
   return `Obsidian on ${platform}`;
 }
+
+/**
+ * Whether Obsidian rewrites links as it renames a file here: its
+ * "Automatically update internal links" setting, which the API reads only
+ * through the vault's config. Unknown counts as no, so NOTE repairs them.
+ */
+export function updatesLinks(app: App): boolean {
+  const vault = app.vault as typeof app.vault & {
+    getConfig?: (key: string) => unknown;
+  };
+  return vault.getConfig?.("alwaysUpdateLinks") === true;
+}

@@ -7,6 +7,11 @@ export interface Entry {
   path: string;
   /** Where the file is now, when it was renamed here since the last sync. */
   moved?: string;
+  /**
+   * Whether Obsidian updated the links to it when it made that rename: it
+   * saw the rename, with "Automatically update internal links" on.
+   */
+  linksUpdated?: boolean;
   /** The remote revision synced; empty until a read or a save names it. */
   revision: string;
   digest: string;

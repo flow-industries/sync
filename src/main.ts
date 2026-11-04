@@ -8,6 +8,7 @@ import {
   linkDevice,
   openDeviceVault,
   SYNC_LOCKED,
+  SYNCED,
   type TrustLoss,
 } from "./device";
 import { requestUrlFetch } from "./fetch";
@@ -21,6 +22,7 @@ import {
   deviceNamespace,
   obsidianSecrets,
   obsidianVault,
+  updatesLinks,
 } from "./obsidian/vault";
 
 /** Flow ID, which links devices and relays the encrypted vault to the person's PDS. */
@@ -44,12 +46,14 @@ export default class NoteSyncPlugin extends Plugin {
         linkDevice,
         openDeviceVault,
         locked: SYNC_LOCKED,
+        synced: SYNCED,
         stale: isStaleWrite,
       },
       host: FLOW_ID,
       fetch: requestUrlFetch(requestUrl),
       local: obsidianVault(this.app),
       configDir: this.app.vault.configDir,
+      updatesLinks: () => updatesLinks(this.app),
       indexFor: (key) => new IndexedDbIndex(indexName(namespace, key)),
       forgetIndexes: () => deleteIndexes(namespace),
       hold: () => holdLock(`flow-note:${namespace}`, LOCK_WAIT_MS),

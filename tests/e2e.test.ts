@@ -24,6 +24,7 @@ import {
   type NoteDeviceFetch,
   openDeviceVault,
   SYNC_LOCKED,
+  SYNCED,
   type TrustLoss,
 } from "../src/device";
 import { SyncEngine, type SyncIndex } from "../src/engine";
@@ -44,6 +45,8 @@ class Secrets implements SecretBackend {
 
 function obsidian(note: FakeFlowId, name: string) {
   const local = new MemoryVault();
+  /** Obsidian's "Automatically update internal links". */
+  const links = { updated: true };
   const secrets = new Secrets();
   const custody = new Custody(secrets, `${name}0000000000`);
   const indexes = new Map<string, SyncIndex>();
@@ -57,12 +60,14 @@ function obsidian(note: FakeFlowId, name: string) {
       linkDevice,
       openDeviceVault,
       locked: SYNC_LOCKED,
+      synced: SYNCED,
       stale: isStaleWrite,
     },
     host: TEST_HOST,
     fetch: (url, init) => note.fetch(url, init),
     local,
     configDir: ".obsidian",
+    updatesLinks: () => links.updated,
     indexFor: (key) => {
       const name = JSON.stringify(key);
       const index = indexes.get(name) ?? new MemoryIndex();
@@ -91,6 +96,7 @@ function obsidian(note: FakeFlowId, name: string) {
   }
   return {
     local,
+    links,
     secrets,
     custody,
     controller,
@@ -348,22 +354,28 @@ describe("two Obsidian vaults synced through NOTE", () => {
  * With "Automatically update internal links" on, Obsidian rewrites a third
  * note's links for the new names, and the plugin pushes that edit before the
  * renames. Those renames skip NOTE's link repair: repairing again would
- * re-target the links in a chain or a swap.
+ * re-target the links in a chain or a swap. A rename Obsidian didn't see, or
+ * made with link updates off, has NOTE repair them instead.
  */
-describe("links in a third note across renames, with Obsidian's link updates on", () => {
-  async function linkedWithIndex() {
+describe("links in another note across renames made in Obsidian", () => {
+  async function linkedWith(files: Record<string, string>) {
     const note = fakeFlowId();
     const admin = await adminBrowser(note);
     const vault = obsidian(note, "dddddd");
     opened.push(vault);
-    vault.local.put("Alpha.md", "alpha");
-    vault.local.put("Beta.md", "beta");
-    vault.local.put("Index.md", "first [[Alpha]] then [[Beta]]");
+    for (const [path, text] of Object.entries(files))
+      vault.local.put(path, text);
     await link(admin, vault);
     await vault.controller.confirm();
     await vault.controller.syncNow();
     return vault;
   }
+  const linkedWithIndex = () =>
+    linkedWith({
+      "Alpha.md": "alpha",
+      "Beta.md": "beta",
+      "Index.md": "first [[Alpha]] then [[Beta]]",
+    });
   /** Renames as Obsidian does, rewriting Index.md's links after each one. */
   async function rename(
     vault: Obsidian,
@@ -380,6 +392,42 @@ describe("links in a third note across renames, with Obsidian's link updates on"
     await Bun.sleep(20);
     await vault.controller.syncNow();
   }
+
+  test("a rename Obsidian didn't see has NOTE repair them", async () => {
+    const vault = await linkedWith({
+      "Alpha.md": "alpha",
+      "Index.md": "see [[Alpha]]",
+    });
+    // Made in the file manager, or while Obsidian was closed: no rename event, no link updates.
+    await vault.local.move("Alpha.md", "Zeta.md");
+    await settle(vault);
+    expect(vault.local.text("Zeta.md")).toBe("alpha");
+    expect(vault.local.text("Index.md")).toMatch(/^see \[\[\/?Zeta\]\]$/u);
+  }, 60_000);
+
+  test("a rename with Obsidian's link updates off has NOTE repair them", async () => {
+    const vault = await linkedWith({
+      "Alpha.md": "alpha",
+      "Index.md": "see [[Alpha]]",
+    });
+    vault.links.updated = false;
+    await vault.local.move("Alpha.md", "Zeta.md");
+    vault.controller.renamed("Alpha.md", "Zeta.md");
+    await settle(vault);
+    expect(vault.local.text("Index.md")).toMatch(/^see \[\[\/?Zeta\]\]$/u);
+  }, 60_000);
+
+  // Pending a device-client option to repair links only in notes Obsidian doesn't index.
+  test.failing("an MDX note's links, which Obsidian never updates, follow a rename it made", async () => {
+    const vault = await linkedWith({
+      "Alpha.md": "alpha",
+      "Index.mdx": "see [[Alpha]]",
+    });
+    await vault.local.move("Alpha.md", "Zeta.md");
+    vault.controller.renamed("Alpha.md", "Zeta.md");
+    await settle(vault);
+    expect(vault.local.text("Index.mdx")).toMatch(/^see \[\[\/?Zeta\]\]$/u);
+  }, 60_000);
 
   test("a single rename keeps them on the right notes", async () => {
     const vault = await linkedWithIndex();
