@@ -30,6 +30,6 @@
     "typescript-eslint": "8.72.1"
   },
   "dependencies": {
-    "@flow-industries/seal": "link:@flow-industries/seal"
+    "@flow-industries/seal": "^0.1.0"
   }
 }
