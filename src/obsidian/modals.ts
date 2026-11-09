@@ -2,18 +2,7 @@ import { type App, Modal, Notice, Setting } from "obsidian";
 import { handleDomain, type LinkedAccount } from "../account";
 import type { SyncController } from "../controller";
 import type { LinkPrompt } from "../device";
-
-/** Where approving a link happens; a verification address anywhere else is shown, never opened. */
-export const NOTE_ORIGIN = "https://note.flow.talk";
-
-const linkPage = (prompt: LinkPrompt) => {
-  try {
-    const url = new URL(prompt.verificationUri);
-    return url.origin === NOTE_ORIGIN ? url.href : null;
-  } catch {
-    return null;
-  }
-};
+import { linkPageFor } from "../link-page";
 
 /** Asks a yes-or-no question; closing the modal answers no. */
 export function confirm(
@@ -127,15 +116,13 @@ export class LinkModal extends Modal {
       contentEl.createEl("p", { text: "Asking Flow ID for a code…" });
       return;
     }
-    const page = linkPage(prompt);
-    if (page && !this.opened) {
+    const page = linkPageFor(prompt.userCode);
+    if (!this.opened) {
       this.opened = true;
       window.open(page);
     }
     contentEl.createEl("p", {
-      text: page
-        ? "NOTE's link page opened in your default browser. Approve from the browser where you use NOTE: if that's another browser or profile, copy the link and open it there. Sign in if asked, enter the Flow ID code if the page asks for it, then type the device code below."
-        : `Open ${NOTE_ORIGIN}/link in the browser where you use NOTE, enter the Flow ID code below, and type the device code.`,
+      text: "NOTE's link page opened in your default browser. Approve from the browser where you use NOTE: if that's another browser or profile, copy the link and open it there. Sign in if asked, enter the Flow ID code if the page asks for it, then type the device code below.",
     });
     new Setting(contentEl).setName("Flow ID code").setDesc(prompt.userCode);
     const secret = new Setting(contentEl)
@@ -147,23 +134,21 @@ export class LinkModal extends Modal {
       cls: "flow-note-code",
       text: prompt.pairingCode,
     });
-    const row = new Setting(contentEl);
-    if (page)
-      row
-        .addButton((button) =>
-          button
-            .setButtonText("Copy link")
-            .onClick(() => void this.copyLink(page)),
-        )
-        .addButton((button) =>
-          button
-            .setButtonText("Open link page again")
-            .onClick(() => window.open(page)),
-        );
-    row.addButton((button) =>
-      button.setButtonText("Cancel").onClick(() => this.close()),
-    );
-    if (page && this.copyFailed)
+    new Setting(contentEl)
+      .addButton((button) =>
+        button
+          .setButtonText("Copy link")
+          .onClick(() => void this.copyLink(page)),
+      )
+      .addButton((button) =>
+        button
+          .setButtonText("Open link page again")
+          .onClick(() => window.open(page)),
+      )
+      .addButton((button) =>
+        button.setButtonText("Cancel").onClick(() => this.close()),
+      );
+    if (this.copyFailed)
       new Setting(contentEl)
         .setName("Link")
         .setDesc(
@@ -233,6 +218,8 @@ export class LinkModal extends Modal {
   private async link() {
     if (!(await this.beforeLink())) return;
     this.error = null;
+    this.opened = false;
+    this.copyFailed = false;
     this.abort = new AbortController();
     try {
       await this.controller.link(

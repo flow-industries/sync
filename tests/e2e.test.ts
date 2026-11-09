@@ -28,6 +28,7 @@ import {
   type TrustLoss,
 } from "../src/device";
 import { SyncEngine, type SyncIndex } from "../src/engine";
+import { linkPageFor } from "../src/link-page";
 import { MemoryIndex, MemoryVault } from "./fakes";
 
 /**
@@ -117,6 +118,11 @@ async function link(admin: AdminBrowser, vault: Obsidian) {
     await new Promise((resolve) => setTimeout(resolve, 10));
   const [prompt] = vault.prompts;
   if (!prompt) throw new Error("No prompt");
+  // The test Flow ID answers with its own verification address; neither seal nor the plugin passes it on.
+  expect(linkPageFor(prompt.userCode)).toBe(
+    "https://note.flow.talk/link?code=BCDF-GHJK",
+  );
+  expect(prompt.linkPage).toBe(linkPageFor(prompt.userCode));
   expect(prompt.pairingCode).toMatch(
     /^[0-9A-HJKMNP-TV-Z]{4} [0-9A-HJKMNP-TV-Z]{4}$/,
   );
