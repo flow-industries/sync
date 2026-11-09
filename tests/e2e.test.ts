@@ -117,7 +117,9 @@ async function link(admin: AdminBrowser, vault: Obsidian) {
     await new Promise((resolve) => setTimeout(resolve, 10));
   const [prompt] = vault.prompts;
   if (!prompt) throw new Error("No prompt");
-  expect(prompt.pairingCode).toMatch(/^\d{4} \d{4} \d{4}$/);
+  expect(prompt.pairingCode).toMatch(
+    /^[0-9A-HJKMNP-TV-Z]{4} [0-9A-HJKMNP-TV-Z]{4}$/,
+  );
   await approveLink(admin, prompt);
   return linking;
 }

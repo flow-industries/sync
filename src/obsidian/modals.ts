@@ -59,6 +59,8 @@ export class LinkModal extends Modal {
   private label: string;
   private error: string | null = null;
   private opened = false;
+  private copyFailed = false;
+  private linkField: HTMLInputElement | null = null;
 
   constructor(
     app: App,
@@ -85,6 +87,7 @@ export class LinkModal extends Modal {
     const { contentEl } = this;
     const { phase } = this.controller;
     contentEl.empty();
+    this.linkField = null;
     if (this.error)
       contentEl.createEl("p", { cls: "mod-warning", text: this.error });
     if (phase.kind === "linking") return this.renderPrompt(phase.prompt);
@@ -131,10 +134,10 @@ export class LinkModal extends Modal {
     }
     contentEl.createEl("p", {
       text: page
-        ? "Your browser opened NOTE's link page. Sign in there if asked, check the code matches, and type the device code below."
-        : `Open ${NOTE_ORIGIN}/link in your browser, enter the code below, and type the device code.`,
+        ? "NOTE's link page opened in your default browser. Approve from the browser where you use NOTE: if that's another browser or profile, copy the link and open it there. Sign in if asked, enter the Flow ID code if the page asks for it, then type the device code below."
+        : `Open ${NOTE_ORIGIN}/link in the browser where you use NOTE, enter the Flow ID code below, and type the device code.`,
     });
-    new Setting(contentEl).setName("Code").setDesc(prompt.userCode);
+    new Setting(contentEl).setName("Flow ID code").setDesc(prompt.userCode);
     const secret = new Setting(contentEl)
       .setName("Device code")
       .setDesc(
@@ -146,14 +149,47 @@ export class LinkModal extends Modal {
     });
     const row = new Setting(contentEl);
     if (page)
-      row.addButton((button) =>
-        button
-          .setButtonText("Open link page again")
-          .onClick(() => window.open(page)),
-      );
+      row
+        .addButton((button) =>
+          button
+            .setButtonText("Copy link")
+            .onClick(() => void this.copyLink(page)),
+        )
+        .addButton((button) =>
+          button
+            .setButtonText("Open link page again")
+            .onClick(() => window.open(page)),
+        );
     row.addButton((button) =>
       button.setButtonText("Cancel").onClick(() => this.close()),
     );
+    if (page && this.copyFailed)
+      new Setting(contentEl)
+        .setName("Link")
+        .setDesc(
+          "Copying failed. Copy the link from here and open it in the browser where you use NOTE.",
+        )
+        .addText((text) => {
+          text.setValue(page);
+          text.inputEl.readOnly = true;
+          this.linkField = text.inputEl;
+        });
+  }
+
+  private async copyLink(page: string) {
+    try {
+      await navigator.clipboard.writeText(page);
+      new Notice("Link copied. Open it in the browser where you use NOTE.");
+    } catch {
+      new Notice(
+        `Couldn't copy the link. Open ${page} in the browser where you use NOTE.`,
+        0,
+      );
+      this.copyFailed = true;
+      this.render();
+      this.linkField?.focus();
+      this.linkField?.select();
+    }
   }
 
   private renderConfirm(account: LinkedAccount) {
