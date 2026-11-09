@@ -1,7 +1,7 @@
 {
   "id": "flow-note",
   "name": "FLOW NOTE Sync",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "minAppVersion": "1.11.5",
   "description": "Sync your vault both ways with your end-to-end encrypted NOTE notepad, linked once through your browser.",
   "author": "Flow Industries",

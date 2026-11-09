@@ -1,7 +1,7 @@
 {
   "name": "flow-note-sync",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "FLOW NOTE Sync for Obsidian",
   "license": "MIT",
   "type": "module",
@@ -30,6 +30,6 @@
     "typescript-eslint": "8.72.1"
   },
   "dependencies": {
-    "@flow-industries/seal": "^0.2.0"
+    "@flow-industries/seal": "^0.3.0"
   }
 }

@@ -16,6 +16,7 @@ import {
   type SyncIndex,
 } from "./engine";
 import type { IndexKey } from "./index-store";
+import { NOTE_ORIGIN } from "./link-page";
 
 /** The device client calls the controller makes. */
 export interface DeviceClient {
@@ -230,6 +231,7 @@ export class SyncController {
       await device.linkDevice(seed, {
         ...this.deviceOptions(),
         label,
+        noteOrigin: NOTE_ORIGIN,
         signal,
         onPrompt: (prompt) => this.set({ kind: "linking", prompt }),
       });
