@@ -2,23 +2,34 @@
   "name": "flow-note-sync",
   "private": true,
   "version": "0.1.0",
-  "description": "NOTE Sync for Obsidian",
+  "description": "FLOW NOTE Sync for Obsidian",
   "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "bun run scripts/build.ts --dev",
     "build": "bun run scripts/build.ts",
     "lint": "biome check",
+    "lint:obsidian": "eslint .",
     "check": "biome check --write",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
-    "version": "bun run scripts/version-bump.ts"
+    "version": "bun run scripts/version-bump.ts",
+    "smoke": "bun run scripts/smoke.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.8",
+    "@eslint/js": "9.39.5",
+    "@eslint/json": "0.14.0",
     "@flow-industries/lint": "0.3.1",
     "@types/bun": "1.3.14",
+    "eslint": "9.39.5",
+    "eslint-plugin-obsidianmd": "0.4.2",
+    "fake-indexeddb": "6.2.4",
     "obsidian": "1.14.4",
-    "typescript": "5.9.3"
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.72.1"
+  },
+  "dependencies": {
+    "@flow-industries/seal": "^0.1.0"
   }
 }
