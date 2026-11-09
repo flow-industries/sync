@@ -15,6 +15,18 @@ const linkPage = (prompt: LinkPrompt) => {
   }
 };
 
+async function copyLink(page: string) {
+  try {
+    await navigator.clipboard.writeText(page);
+    new Notice("Link copied. Open it in the browser where you use NOTE.");
+  } catch {
+    new Notice(
+      `Couldn't copy the link. Open ${page} in the browser where you use NOTE.`,
+      0,
+    );
+  }
+}
+
 /** Asks a yes-or-no question; closing the modal answers no. */
 export function confirm(
   app: App,
@@ -131,10 +143,10 @@ export class LinkModal extends Modal {
     }
     contentEl.createEl("p", {
       text: page
-        ? "Your browser opened NOTE's link page. Sign in there if asked, check the code matches, and type the device code below."
-        : `Open ${NOTE_ORIGIN}/link in your browser, enter the code below, and type the device code.`,
+        ? "NOTE's link page opened in your default browser. Approve from the browser where you use NOTE: if that's another browser or profile, copy the link and open it there. Sign in if asked, check the Flow ID code matches, and type the device code below."
+        : `Open ${NOTE_ORIGIN}/link in the browser where you use NOTE, enter the Flow ID code below, and type the device code.`,
     });
-    new Setting(contentEl).setName("Code").setDesc(prompt.userCode);
+    new Setting(contentEl).setName("Flow ID code").setDesc(prompt.userCode);
     const secret = new Setting(contentEl)
       .setName("Device code")
       .setDesc(
@@ -146,11 +158,15 @@ export class LinkModal extends Modal {
     });
     const row = new Setting(contentEl);
     if (page)
-      row.addButton((button) =>
-        button
-          .setButtonText("Open link page again")
-          .onClick(() => window.open(page)),
-      );
+      row
+        .addButton((button) =>
+          button.setButtonText("Copy link").onClick(() => void copyLink(page)),
+        )
+        .addButton((button) =>
+          button
+            .setButtonText("Open link page again")
+            .onClick(() => window.open(page)),
+        );
     row.addButton((button) =>
       button.setButtonText("Cancel").onClick(() => this.close()),
     );
