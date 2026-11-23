@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import * as kit from "@flow-industries/seal/internal/testing/kit";
 import {
   type AdminBrowser,
   adminBrowser,
@@ -27,9 +28,10 @@ import {
   SYNC_LOCKED,
   type TrustLoss,
 } from "../src/device";
-import { SyncEngine, type SyncIndex } from "../src/engine";
+import { type Deletions, SyncEngine, type SyncIndex } from "../src/engine";
 import { linkPageFor } from "../src/link-page";
 import { MemoryIndex, MemoryVault } from "./fakes";
+import { startOver } from "./start-over";
 
 /**
  * Two Obsidian vaults linked as two devices of one NOTE notepad, syncing
@@ -54,6 +56,8 @@ function obsidian(note: FakeFlowId, name: string) {
   const prompts: LinkPrompt[] = [];
   const losses: TrustLoss[] = [];
   const notices: string[] = [];
+  /** Every mass deletion a round asked to confirm; each is approved, so a planned deletion would run. */
+  const asked: Deletions[] = [];
   const controller: SyncController = new SyncController({
     custody,
     device: {
@@ -78,7 +82,10 @@ function obsidian(note: FakeFlowId, name: string) {
     forgetIndexes: async () => indexes.clear(),
     hold: async () => () => {},
     forgetDevice: deleteDeviceStorage,
-    confirmDeletions: async () => true,
+    confirmDeletions: async (deletions) => {
+      asked.push(deletions);
+      return true;
+    },
     onChange: () => {
       if (controller?.phase.kind === "linking" && controller.phase.prompt)
         prompts.push(controller.phase.prompt);
@@ -104,12 +111,17 @@ function obsidian(note: FakeFlowId, name: string) {
     prompts,
     losses,
     notices,
+    asked,
     turn,
   };
 }
 type Obsidian = ReturnType<typeof obsidian>;
 
-async function link(admin: AdminBrowser, vault: Obsidian) {
+async function link(
+  admin: AdminBrowser | ((prompt: LinkPrompt) => Promise<void>),
+  vault: Obsidian,
+) {
+  vault.prompts.length = 0;
   const linking = vault.controller.link(
     "Obsidian on test",
     new AbortController().signal,
@@ -126,7 +138,9 @@ async function link(admin: AdminBrowser, vault: Obsidian) {
   expect(prompt.pairingCode).toMatch(
     /^[0-9A-HJKMNP-TV-Z]{4} [0-9A-HJKMNP-TV-Z]{4}$/,
   );
-  await approveLink(admin, prompt);
+  await (typeof admin === "function"
+    ? admin(prompt)
+    : approveLink(admin, prompt));
   return linking;
 }
 
@@ -468,5 +482,230 @@ describe("links in another note across renames made in Obsidian", () => {
     expect(vault.local.text("Beta.md")).toBe("alpha");
     expect(vault.local.text("Alpha.md")).toBe("beta");
     expect(vault.local.text("Index.md")).toBe("first [[Beta]] then [[Alpha]]");
+  }, 60_000);
+});
+
+/**
+ * NOTE's "Start a new notepad" publishes a brand-new vault over the one a
+ * device was linked to (new id, new key, only the new passkey listed) and
+ * revokes every device's token. A linked vault must stop as removed, in
+ * either order and whether it was syncing or closed, without trashing a file
+ * or reading the new, empty notepad as everything deleted. Linking it again
+ * then pushes every file into the new notepad.
+ */
+describe("a notepad started over in NOTE", () => {
+  const photo = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 4, 5, 6]);
+  const files: Record<string, string | Uint8Array> = {
+    "Code.mdx": "export const x = 1\n\n<Never runs here />",
+    "img/photo.png": photo,
+  };
+  // More than a mass deletion's threshold, so planned deletions would ask before they ran.
+  for (let n = 1; n <= 12; n++)
+    files[`Inbox/Note ${n}.md`] = `# Note ${n}\n\nlinks [[Note ${n + 1}]]`;
+
+  const downloadedBlob = (init: RequestInit) =>
+    (
+      JSON.parse(typeof init.body === "string" ? init.body : "{}") as {
+        cid?: string;
+      }
+    ).cid ?? "";
+  const snapshot = (vault: Obsidian) =>
+    new Map([...vault.local.files].map(([path, file]) => [path, file.body]));
+
+  async function linkedVault(name: string) {
+    const note = kit.fakeFlowId();
+    const admin = await kit.adminBrowser(note);
+    /** The old notepad's blobs, once NOTE removed them: every download of one is refused as missing. */
+    const gone = new Set<string>();
+    const flowId: FakeFlowId = {
+      ...note,
+      fetch: async (url, init) =>
+        new URL(url).pathname === "/api/atproto/note/download" &&
+        gone.has(downloadedBlob(init))
+          ? Response.json({ code: "NOT_FOUND" }, { status: 404 })
+          : note.fetch(url, init),
+    };
+    const vault = obsidian(flowId, name);
+    opened.push(vault);
+    for (const [path, body] of Object.entries(files))
+      vault.local.put(path, body);
+    await link((prompt) => kit.approveLink(admin, prompt), vault);
+    await vault.controller.confirm();
+    await vault.controller.syncNow();
+    expect(vault.controller.phase).toEqual({ kind: "open", status: "Synced" });
+    expect(await kit.openAdminVault(admin).then(readAndLock)).toHaveLength(13);
+    const dropBlobs = () => {
+      for (const blob of note.record()?.value.blobs ?? [])
+        gone.add(blob.ref.$link);
+    };
+    return { note, flowId, vault, dropBlobs };
+  }
+  async function readAndLock(
+    notepad: Awaited<ReturnType<typeof kit.openAdminVault>>,
+  ) {
+    try {
+      await notepad.sync();
+      return (await notepad.read()).notes;
+    } finally {
+      notepad.lock();
+    }
+  }
+  async function removal(vault: Obsidian) {
+    for (
+      let wait = 0;
+      vault.controller.phase.kind !== "removed" && wait < 100;
+      wait++
+    )
+      await Bun.sleep(50);
+    return vault.controller.phase;
+  }
+  /** Runs NOTE's side in `order`: the new notepad goes over the record with the old blobs removed, and every device token is revoked. */
+  async function apply(
+    { note, dropBlobs }: Awaited<ReturnType<typeof linkedVault>>,
+    order: readonly ("start over" | "revoke")[],
+  ) {
+    let fresh: kit.AdminBrowser | undefined;
+    for (const step of order)
+      if (step === "revoke") note.revokeAll();
+      else {
+        fresh = await startOver(note);
+        dropBlobs();
+      }
+    return fresh;
+  }
+  /** Every file as it was, nothing trashed or asked about, the keys gone and the new notepad untouched by this device. */
+  async function expectStoppedSafely(
+    vault: Obsidian,
+    before: ReturnType<typeof snapshot>,
+    record: ReturnType<kit.FakeFlowId["record"]>,
+    linked: Awaited<ReturnType<typeof linkedVault>>,
+    fresh: kit.AdminBrowser | undefined,
+  ) {
+    expect(snapshot(vault)).toEqual(before);
+    expect(vault.local.trashed).toEqual([]);
+    expect(vault.asked).toEqual([]);
+    expect(vault.custody.seed()).toBeNull();
+    expect(await vault.custody.credentials.read()).toBeNull();
+    expect(await vault.custody.checkpoints.read()).not.toBeNull();
+    // Nothing reaches the PDS once access is gone: the record is the one NOTE left.
+    expect(linked.note.record()).toEqual(record);
+    expect(linked.note.violations).toEqual([]);
+    if (fresh)
+      expect(await kit.openAdminVault(fresh).then(readAndLock)).toEqual([]);
+    // Syncing again changes nothing, and Obsidian restarting finds no link to open.
+    await vault.controller.syncNow();
+    expect(vault.controller.phase.kind).toBe("removed");
+    await vault.controller.start();
+    expect(vault.controller.phase).toEqual({ kind: "unlinked" });
+    expect(snapshot(vault)).toEqual(before);
+    expect(vault.local.trashed).toEqual([]);
+  }
+
+  const orders = [
+    ["NOTE starts over", ["start over"], "removed"],
+    ["Flow ID revokes the device", ["revoke"], "revoked"],
+    ["NOTE starts over, then revokes", ["start over", "revoke"], "revoked"],
+    ["NOTE revokes, then starts over", ["revoke", "start over"], "revoked"],
+  ] as const;
+
+  test.each(orders)(
+    "a syncing vault stops when %s, keeping every file",
+    async (_, order, reason) => {
+      const linked = await linkedVault("eeeeee");
+      const { vault } = linked;
+      const fresh = await apply(linked, order);
+      const record = linked.note.record();
+      vault.local.put("Inbox/Note 1.md", "edited here meanwhile");
+      vault.local.put("Late.md", "written after the start-over");
+      const before = snapshot(vault);
+      await vault.controller.syncNow();
+      expect(await removal(vault)).toEqual({
+        kind: "removed",
+        message: REMOVED[reason],
+      });
+      expect(vault.notices).toContain(REMOVED[reason]);
+      await expectStoppedSafely(vault, before, record, linked, fresh);
+    },
+    60_000,
+  );
+
+  test.each(orders)(
+    "a closed vault stops on its next open when %s, keeping every file",
+    async (_, order, reason) => {
+      const linked = await linkedVault("ffffff");
+      const { vault } = linked;
+      vault.controller.close();
+      const fresh = await apply(linked, order);
+      const record = linked.note.record();
+      vault.local.put("Inbox/Note 2.md", "edited while Obsidian was closed");
+      vault.local.files.delete("Inbox/Note 3.md");
+      const before = snapshot(vault);
+      await vault.controller.start();
+      expect(vault.controller.phase).toEqual({
+        kind: "removed",
+        message: REMOVED[reason],
+      });
+      await expectStoppedSafely(vault, before, record, linked, fresh);
+    },
+    60_000,
+  );
+
+  test("the old notepad's blobs going first only pauses syncing, until the new notepad stops it", async () => {
+    const linked = await linkedVault("aaaabbbb");
+    const { vault } = linked;
+    linked.dropBlobs();
+    vault.local.put("Late.md", "written while the blobs were gone");
+    await vault.controller.syncNow();
+    await vault.controller.syncNow();
+    expect(vault.controller.phase.kind).toBe("open");
+    expect(vault.controller.phase).not.toEqual({
+      kind: "open",
+      status: "Synced",
+    });
+    expect(vault.local.trashed).toEqual([]);
+    expect(vault.asked).toEqual([]);
+    const fresh = await apply(linked, ["start over", "revoke"]);
+    const record = linked.note.record();
+    const before = snapshot(vault);
+    await vault.controller.syncNow();
+    expect((await removal(vault)).kind).toBe("removed");
+    await expectStoppedSafely(vault, before, record, linked, fresh);
+  }, 60_000);
+
+  test("linking again pushes every file into the new notepad and deletes nothing", async () => {
+    const linked = await linkedVault("bbbbcccc");
+    const { vault } = linked;
+    const fresh = await apply(linked, ["start over", "revoke"]);
+    if (!fresh) throw new Error("No new notepad");
+    vault.local.put("Late.md", "written after the start-over");
+    await vault.controller.syncNow();
+    expect((await removal(vault)).kind).toBe("removed");
+    const before = snapshot(vault);
+
+    await link((prompt) => kit.approveLink(fresh, prompt), vault);
+    await vault.controller.confirm();
+    await vault.controller.syncNow();
+    await vault.controller.syncNow();
+    expect(vault.controller.phase).toEqual({ kind: "open", status: "Synced" });
+    expect(snapshot(vault)).toEqual(before);
+    expect(vault.local.trashed).toEqual([]);
+    expect(vault.asked).toEqual([]);
+
+    const notes = await kit.openAdminVault(fresh).then(readAndLock);
+    expect(new Map(notes.map((item) => [item.path, item.source]))).toEqual(
+      new Map(
+        [...before].flatMap(([path, body]) =>
+          typeof body === "string" ? [[path, body]] : [],
+        ),
+      ),
+    );
+    // A second vault linked to the new notepad receives every file, the attachment included.
+    const other = obsidian(linked.flowId, "ccccdddd");
+    opened.push(other);
+    await link((prompt) => kit.approveLink(fresh, prompt), other);
+    await other.controller.confirm();
+    await other.controller.syncNow();
+    expect(snapshot(other)).toEqual(before);
+    expect(linked.note.violations).toEqual([]);
   }, 60_000);
 });
