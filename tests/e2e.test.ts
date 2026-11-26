@@ -13,7 +13,7 @@ import {
   TEST_DID,
   TEST_HOST,
 } from "@flow-industries/seal/testing";
-import { REMOVED, SyncController } from "../src/controller";
+import { KEPT, REMOVED, SyncController } from "../src/controller";
 import { Custody, type SecretBackend } from "../src/custody";
 import {
   createDeviceSeed,
@@ -321,9 +321,9 @@ describe("two Obsidian vaults synced through NOTE", () => {
     await a.controller.start();
     expect(a.controller.phase).toEqual({
       kind: "stopped",
-      message: UNREACHABLE,
+      message: `${UNREACHABLE} ${KEPT}`,
     });
-    expect(a.notices).toEqual([`Syncing stopped. ${UNREACHABLE}`]);
+    expect(a.notices).toEqual([`Syncing stopped. ${UNREACHABLE} ${KEPT}`]);
 
     a.network.down = false;
     await a.controller.syncNow();

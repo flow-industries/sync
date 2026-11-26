@@ -10,6 +10,7 @@ import {
 } from "@flow-industries/seal";
 import {
   type ControllerOptions,
+  KEPT,
   KEY_MISSING,
   LOCKED_ELSEWHERE,
   messageOf,
@@ -23,6 +24,7 @@ import {
   type DeviceOptions,
   type DeviceVault,
   followsRead,
+  REFUSED,
   statusWords,
   UNREACHABLE,
 } from "../src/device";
@@ -361,24 +363,36 @@ describe("controller", () => {
     expect(followsRead(SYNC_BUSY)).toBe(false);
   });
 
-  test("Flow ID out of reach or busy stops an open in words, never a code", async () => {
+  test("a Flow ID refusal stops an open in words, never a code, and says the changes are kept", async () => {
     for (const [code, status, words] of [
       ["CONNECTION_LOST", 0, UNREACHABLE],
       ["UPLOAD_INCOMPLETE", 408, UNREACHABLE],
+      ["PDS_UNAVAILABLE", 503, UNREACHABLE],
       ["UPLOAD_BUSY", 429, BUSY],
+      ["RATE_LIMITED", 429, REFUSED],
+      ["RECONNECT_REQUIRED", 403, REFUSED],
+      ["DEVICE_LINKING_DISABLED", 403, REFUSED],
     ] as const) {
+      // How the device client throws a transport refusal: an Error whose message is the code.
+      const refusal = () => Object.assign(new Error(code), { code, status });
       const h = await harness({
         onOpen: () => {
-          // How the device client throws a transport refusal: an Error whose message is the code.
-          throw Object.assign(new Error(code), { code, status });
+          throw refusal();
         },
       });
       await h.controller.start();
-      expect(h.controller.phase).toEqual({ kind: "stopped", message: words });
-      expect(h.notices).toEqual([`Syncing stopped. ${words}`]);
-      expect(messageOf(Object.assign(new Error(code), { code }))).toBe(words);
+      const stopped = `${words} ${KEPT}`;
+      expect(h.controller.phase).toEqual({ kind: "stopped", message: stopped });
+      expect(h.notices).toEqual([`Syncing stopped. ${stopped}`]);
+      // A link has no changes in play, so the link modal's words leave that out.
+      expect(messageOf(refusal())).toBe(words);
+      expect(messageOf(refusal())).not.toContain(code);
     }
     expect(messageOf(new Error(LOCKED_ELSEWHERE))).toBe(LOCKED_ELSEWHERE);
+    // A code without a status isn't Flow ID's, so it keeps its own message.
+    expect(
+      messageOf(Object.assign(new Error("no such file"), { code: "ENOENT" })),
+    ).toBe("no such file");
     expect(messageOf("plain")).toBe("plain");
   });
 

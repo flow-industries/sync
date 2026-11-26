@@ -208,7 +208,7 @@ export class SyncController {
     } catch (error) {
       if (!this.live(generation)) return;
       this.close();
-      this.set({ kind: "stopped", message: messageOf(error) });
+      this.set({ kind: "stopped", message: stopMessageOf(error) });
     }
   }
 
@@ -456,7 +456,7 @@ export class SyncController {
       if (!this.live(generation)) return;
       this.close();
       if (this.phase.kind !== "removed")
-        this.set({ kind: "stopped", message: messageOf(error) });
+        this.set({ kind: "stopped", message: stopMessageOf(error) });
     } finally {
       seed?.fill(0);
     }
@@ -507,3 +507,12 @@ export class SyncController {
 export const messageOf = (error: unknown) =>
   failureWords(error) ??
   (error instanceof Error ? error.message : String(error));
+
+/** Said after a stop Flow ID caused: syncing stopped, but nothing here changed. */
+export const KEPT = "Your changes are kept.";
+
+/** What a stop says: one Flow ID caused also says the files here are kept. */
+const stopMessageOf = (error: unknown) => {
+  const words = failureWords(error);
+  return words ? `${words} ${KEPT}` : messageOf(error);
+};

@@ -51,17 +51,32 @@ export function followsRead(status: string): boolean {
   );
 }
 
-export const UNREACHABLE =
-  "Couldn't reach Flow ID. Your changes are kept; try again once it's back.";
-export const BUSY =
-  "Flow ID is busy. Your changes are kept; try again in a moment.";
+export const UNREACHABLE = "Couldn't reach Flow ID. Try again once it's back.";
+export const BUSY = "Flow ID is busy. Try again in a moment.";
+export const REFUSED = "Flow ID couldn't complete that. Try again later.";
 
-/** Words for a failure Flow ID reported by its code, so no code reaches the person: undefined for any other failure. */
+/** The code of a refusal Flow ID's SDK threw: a string `code` beside a numeric `status`. */
+function refusalCode(error: unknown): string | undefined {
+  if (typeof error !== "object" || error === null) return undefined;
+  if (!("code" in error) || !("status" in error)) return undefined;
+  return typeof error.code === "string" && typeof error.status === "number"
+    ? error.code
+    : undefined;
+}
+
+/**
+ * Words for a failure Flow ID reported by its code, so no code reaches the
+ * person; undefined for any other failure, which says what went wrong itself.
+ * `PDS_UNAVAILABLE` is also what an error page without a code reads as, such
+ * as a gateway's during an outage, so it reads as out of reach.
+ */
 export function failureWords(error: unknown): string | undefined {
   const transient = transientFailure(error);
-  if (transient === "connection") return UNREACHABLE;
   if (transient === "busy") return BUSY;
-  return undefined;
+  const code = refusalCode(error);
+  if (transient === "connection" || code === "PDS_UNAVAILABLE")
+    return UNREACHABLE;
+  return code === undefined ? undefined : REFUSED;
 }
 
 /** What the status bar says for a device status. Flow ID out of reach or busy reads as a wait, since the device retries on its own. */
