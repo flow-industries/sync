@@ -1,6 +1,6 @@
 import { type App, Modal, Notice, Setting } from "obsidian";
 import { handleDomain, type LinkedAccount } from "../account";
-import type { SyncController } from "../controller";
+import { messageOf, type SyncController } from "../controller";
 import type { LinkPrompt } from "../device";
 import { linkPageFor } from "../link-page";
 
@@ -227,8 +227,7 @@ export class LinkModal extends Modal {
         this.abort.signal,
       );
     } catch (error) {
-      if (!this.abort.signal.aborted)
-        this.error = error instanceof Error ? error.message : String(error);
+      if (!this.abort.signal.aborted) this.error = messageOf(error);
     } finally {
       this.abort = null;
       this.render();

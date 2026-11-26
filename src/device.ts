@@ -1,8 +1,11 @@
 import {
+  failureReason,
   NoteChangedError,
   parseSyncBackoff,
+  SYNC_BUSY,
   SYNC_QUOTA_REACHED,
   SYNC_TOO_LARGE,
+  SYNC_UNREACHABLE,
   SYNCED,
 } from "@flow-industries/seal";
 
@@ -46,4 +49,25 @@ export function followsRead(status: string): boolean {
     refusal === SYNC_QUOTA_REACHED ||
     refusal === SYNC_TOO_LARGE
   );
+}
+
+export const UNREACHABLE =
+  "Couldn't reach Flow ID. Your changes are kept; try again once it's back.";
+export const BUSY =
+  "Flow ID is busy. Your changes are kept; try again in a moment.";
+
+/** Words for a failure Flow ID reported by its code, so no code reaches the person: undefined for any other failure. */
+export function failureWords(error: unknown): string | undefined {
+  const reason = failureReason(error);
+  if (reason === "connection") return UNREACHABLE;
+  if (reason === "busy") return BUSY;
+  return undefined;
+}
+
+/** What the status bar says for a device status. Flow ID out of reach or busy reads as a wait, since the device retries on its own. */
+export function statusWords(status: string): string {
+  if (status === SYNC_UNREACHABLE)
+    return "Couldn't reach Flow ID; changes are kept and will sync when it's back";
+  if (status === SYNC_BUSY) return "Syncing again in a moment";
+  return status;
 }

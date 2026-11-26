@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
+  SYNC_BUSY,
   SYNC_PENDING,
   SYNC_QUOTA_REACHED,
   SYNC_RATE_LIMITED,
+  SYNC_UNREACHABLE,
   SYNCED,
   type SyncListener,
 } from "@flow-industries/seal";
@@ -10,15 +12,19 @@ import {
   type ControllerOptions,
   KEY_MISSING,
   LOCKED_ELSEWHERE,
+  messageOf,
   REMOVED,
   STRANDED,
   SyncController,
 } from "../src/controller";
 import { Custody, type SecretBackend } from "../src/custody";
 import {
+  BUSY,
   type DeviceOptions,
   type DeviceVault,
   followsRead,
+  statusWords,
+  UNREACHABLE,
 } from "../src/device";
 import { sha256 } from "../src/hash";
 import { isStale, MemoryIndex, MemoryRemote, MemoryVault } from "./fakes";
@@ -350,6 +356,43 @@ describe("controller", () => {
     // A rate limit can refuse the read itself, so it never counts.
     expect(followsRead(`${SYNC_RATE_LIMITED} · Next sync 12:00`)).toBe(false);
     expect(followsRead(SYNC_PENDING)).toBe(false);
+    // Nor can a read that never got an answer, or a busy Flow ID's.
+    expect(followsRead(SYNC_UNREACHABLE)).toBe(false);
+    expect(followsRead(SYNC_BUSY)).toBe(false);
+  });
+
+  test("Flow ID out of reach or busy stops an open in words, never a code", async () => {
+    for (const [code, status, words] of [
+      ["CONNECTION_LOST", 0, UNREACHABLE],
+      ["UPLOAD_INCOMPLETE", 408, UNREACHABLE],
+      ["UPLOAD_BUSY", 429, BUSY],
+    ] as const) {
+      const h = await harness({
+        onOpen: () => {
+          // How the device client throws a transport refusal: an Error whose message is the code.
+          throw Object.assign(new Error(code), { code, status });
+        },
+      });
+      await h.controller.start();
+      expect(h.controller.phase).toEqual({ kind: "stopped", message: words });
+      expect(h.notices).toEqual([`Syncing stopped. ${words}`]);
+      expect(messageOf(Object.assign(new Error(code), { code }))).toBe(words);
+    }
+    expect(messageOf(new Error(LOCKED_ELSEWHERE))).toBe(LOCKED_ELSEWHERE);
+    expect(messageOf("plain")).toBe("plain");
+  });
+
+  test("the status bar reads Flow ID out of reach or busy as a wait, and passes every other status through", () => {
+    expect(statusWords(SYNC_UNREACHABLE)).toBe(
+      "Couldn't reach Flow ID; changes are kept and will sync when it's back",
+    );
+    expect(statusWords(SYNC_BUSY)).toBe("Syncing again in a moment");
+    for (const status of [
+      SYNCED,
+      SYNC_PENDING,
+      `${SYNC_RATE_LIMITED} · Next sync 12:00`,
+    ])
+      expect(statusWords(status)).toBe(status);
   });
 
   test("a close while the vault still opens keeps the lock until that open settles and stops", async () => {

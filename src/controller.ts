@@ -1,12 +1,13 @@
 import { type LinkedAccount, linkedAccount } from "./account";
 import type { Custody } from "./custody";
-import type {
-  DeviceOptions,
-  DeviceVault,
-  LinkOptions,
-  LinkPrompt,
-  NoteDeviceFetch,
-  TrustLoss,
+import {
+  type DeviceOptions,
+  type DeviceVault,
+  failureWords,
+  type LinkOptions,
+  type LinkPrompt,
+  type NoteDeviceFetch,
+  type TrustLoss,
 } from "./device";
 import {
   type Deletions,
@@ -502,5 +503,7 @@ export class SyncController {
   }
 }
 
-const messageOf = (error: unknown) =>
-  error instanceof Error ? error.message : String(error);
+/** What the person reads for a failure: words for one Flow ID reported by code, else its own message. */
+export const messageOf = (error: unknown) =>
+  failureWords(error) ??
+  (error instanceof Error ? error.message : String(error));

@@ -1,5 +1,6 @@
 import { type App, type Plugin, PluginSettingTab, Setting } from "obsidian";
 import type { Phase, SyncController } from "../controller";
+import { statusWords } from "../device";
 import type { RoundResult } from "../engine";
 import { accountName, confirm } from "./modals";
 import { custodyNote, updatesLinks } from "./vault";
@@ -23,7 +24,7 @@ export function statusText(phase: Phase, round: RoundResult | null): string {
       const failed = round?.failed.length ?? 0;
       const held = (round?.held.local ?? 0) + (round?.held.remote ?? 0);
       return [
-        `FLOW NOTE: ${phase.status}`,
+        `FLOW NOTE: ${statusWords(phase.status)}`,
         failed ? `${failed} not synced` : "",
         held ? `${held} deletions held` : "",
       ]
