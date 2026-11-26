@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { SYNC_UNREACHABLE } from "@flow-industries/seal";
+import { SYNC_CONNECTION_FAILED } from "@flow-industries/seal";
 import * as kit from "@flow-industries/seal/internal/testing/kit";
 import {
   type AdminBrowser,
@@ -16,6 +16,7 @@ import {
 import { KEPT, REMOVED, SyncController } from "../src/controller";
 import { Custody, type SecretBackend } from "../src/custody";
 import {
+  CONNECTION_FAILED,
   createDeviceSeed,
   type DeviceCheckpoint,
   deleteDeviceStorage,
@@ -28,7 +29,6 @@ import {
   openDeviceVault,
   SYNC_LOCKED,
   type TrustLoss,
-  UNREACHABLE,
 } from "../src/device";
 import { type Deletions, SyncEngine, type SyncIndex } from "../src/engine";
 import { linkPageFor } from "../src/link-page";
@@ -296,7 +296,7 @@ describe("two Obsidian vaults synced through NOTE", () => {
     expect(note.violations).toEqual([]);
   }, 60_000);
 
-  test("Flow ID out of reach reads as a wait, never a code, and syncs once it's back", async () => {
+  test("a failed connection to Flow ID reads as a wait, never a code, and syncs once it's back", async () => {
     const note = fakeFlowId();
     const admin = await adminBrowser(note);
     const a = obsidian(note, "dddddd");
@@ -312,7 +312,7 @@ describe("two Obsidian vaults synced through NOTE", () => {
     await a.controller.syncNow();
     expect(a.controller.phase).toEqual({
       kind: "open",
-      status: SYNC_UNREACHABLE,
+      status: SYNC_CONNECTION_FAILED,
     });
     a.controller.close();
 
@@ -321,9 +321,11 @@ describe("two Obsidian vaults synced through NOTE", () => {
     await a.controller.start();
     expect(a.controller.phase).toEqual({
       kind: "stopped",
-      message: `${UNREACHABLE} ${KEPT}`,
+      message: `${CONNECTION_FAILED} ${KEPT}`,
     });
-    expect(a.notices).toEqual([`Syncing stopped. ${UNREACHABLE} ${KEPT}`]);
+    expect(a.notices).toEqual([
+      `Syncing stopped. ${CONNECTION_FAILED} ${KEPT}`,
+    ]);
 
     a.network.down = false;
     await a.controller.syncNow();

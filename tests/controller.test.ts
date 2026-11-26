@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
   SYNC_BUSY,
+  SYNC_CONNECTION_FAILED,
   SYNC_PENDING,
   SYNC_QUOTA_REACHED,
   SYNC_RATE_LIMITED,
-  SYNC_UNREACHABLE,
   SYNCED,
   type SyncListener,
 } from "@flow-industries/seal";
@@ -21,12 +21,13 @@ import {
 import { Custody, type SecretBackend } from "../src/custody";
 import {
   BUSY,
+  CONNECTION_FAILED,
   type DeviceOptions,
   type DeviceVault,
   followsRead,
   REFUSED,
   statusWords,
-  UNREACHABLE,
+  UNAVAILABLE,
 } from "../src/device";
 import { sha256 } from "../src/hash";
 import { isStale, MemoryIndex, MemoryRemote, MemoryVault } from "./fakes";
@@ -359,15 +360,15 @@ describe("controller", () => {
     expect(followsRead(`${SYNC_RATE_LIMITED} · Next sync 12:00`)).toBe(false);
     expect(followsRead(SYNC_PENDING)).toBe(false);
     // Nor can a read that never got an answer, or a busy Flow ID's.
-    expect(followsRead(SYNC_UNREACHABLE)).toBe(false);
+    expect(followsRead(SYNC_CONNECTION_FAILED)).toBe(false);
     expect(followsRead(SYNC_BUSY)).toBe(false);
   });
 
   test("a Flow ID refusal stops an open in words, never a code, and says the changes are kept", async () => {
     for (const [code, status, words] of [
-      ["CONNECTION_LOST", 0, UNREACHABLE],
-      ["UPLOAD_INCOMPLETE", 408, UNREACHABLE],
-      ["PDS_UNAVAILABLE", 503, UNREACHABLE],
+      ["CONNECTION_LOST", 0, CONNECTION_FAILED],
+      ["UPLOAD_INCOMPLETE", 408, CONNECTION_FAILED],
+      ["PDS_UNAVAILABLE", 503, UNAVAILABLE],
       ["UPLOAD_BUSY", 429, BUSY],
       ["RATE_LIMITED", 429, REFUSED],
       ["RECONNECT_REQUIRED", 403, REFUSED],
@@ -396,9 +397,9 @@ describe("controller", () => {
     expect(messageOf("plain")).toBe("plain");
   });
 
-  test("the status bar reads Flow ID out of reach or busy as a wait, and passes every other status through", () => {
-    expect(statusWords(SYNC_UNREACHABLE)).toBe(
-      "Couldn't reach Flow ID; changes are kept and will sync when it's back",
+  test("the status bar reads a failed connection or a busy Flow ID as a wait, and passes every other status through", () => {
+    expect(statusWords(SYNC_CONNECTION_FAILED)).toBe(
+      "Connection to Flow ID failed; changes are kept and sync resumes once it's back",
     );
     expect(statusWords(SYNC_BUSY)).toBe("Syncing again in a moment");
     for (const status of [
