@@ -1,5 +1,4 @@
 import {
-  failureReason,
   NoteChangedError,
   parseSyncBackoff,
   SYNC_BUSY,
@@ -7,6 +6,7 @@ import {
   SYNC_TOO_LARGE,
   SYNC_UNREACHABLE,
   SYNCED,
+  transientFailure,
 } from "@flow-industries/seal";
 
 /** The one place the plugin imports the NOTE device client from. */
@@ -58,9 +58,9 @@ export const BUSY =
 
 /** Words for a failure Flow ID reported by its code, so no code reaches the person: undefined for any other failure. */
 export function failureWords(error: unknown): string | undefined {
-  const reason = failureReason(error);
-  if (reason === "connection") return UNREACHABLE;
-  if (reason === "busy") return BUSY;
+  const transient = transientFailure(error);
+  if (transient === "connection") return UNREACHABLE;
+  if (transient === "busy") return BUSY;
   return undefined;
 }
 
