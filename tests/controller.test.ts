@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
+  SYNC_BUSY,
+  SYNC_CONNECTION_FAILED,
   SYNC_PENDING,
   SYNC_QUOTA_REACHED,
   SYNC_RATE_LIMITED,
@@ -8,17 +10,24 @@ import {
 } from "@flow-industries/seal";
 import {
   type ControllerOptions,
+  KEPT,
   KEY_MISSING,
   LOCKED_ELSEWHERE,
+  messageOf,
   REMOVED,
   STRANDED,
   SyncController,
 } from "../src/controller";
 import { Custody, type SecretBackend } from "../src/custody";
 import {
+  BUSY,
+  CONNECTION_FAILED,
   type DeviceOptions,
   type DeviceVault,
   followsRead,
+  REFUSED,
+  statusWords,
+  UNAVAILABLE,
 } from "../src/device";
 import { sha256 } from "../src/hash";
 import { isStale, MemoryIndex, MemoryRemote, MemoryVault } from "./fakes";
@@ -350,6 +359,55 @@ describe("controller", () => {
     // A rate limit can refuse the read itself, so it never counts.
     expect(followsRead(`${SYNC_RATE_LIMITED} · Next sync 12:00`)).toBe(false);
     expect(followsRead(SYNC_PENDING)).toBe(false);
+    // Nor can a read that never got an answer, or a busy Flow ID's.
+    expect(followsRead(SYNC_CONNECTION_FAILED)).toBe(false);
+    expect(followsRead(SYNC_BUSY)).toBe(false);
+  });
+
+  test("a Flow ID refusal stops an open in words, never a code, and says the changes are kept", async () => {
+    for (const [code, status, words] of [
+      ["CONNECTION_LOST", 0, CONNECTION_FAILED],
+      ["UPLOAD_INCOMPLETE", 408, CONNECTION_FAILED],
+      ["PDS_UNAVAILABLE", 503, UNAVAILABLE],
+      ["UPLOAD_BUSY", 429, BUSY],
+      ["RATE_LIMITED", 429, REFUSED],
+      ["RECONNECT_REQUIRED", 403, REFUSED],
+      ["DEVICE_LINKING_DISABLED", 403, REFUSED],
+    ] as const) {
+      // How the device client throws a transport refusal: an Error whose message is the code.
+      const refusal = () => Object.assign(new Error(code), { code, status });
+      const h = await harness({
+        onOpen: () => {
+          throw refusal();
+        },
+      });
+      await h.controller.start();
+      const stopped = `${words} ${KEPT}`;
+      expect(h.controller.phase).toEqual({ kind: "stopped", message: stopped });
+      expect(h.notices).toEqual([`Syncing stopped. ${stopped}`]);
+      // A link has no changes in play, so the link modal's words leave that out.
+      expect(messageOf(refusal())).toBe(words);
+      expect(messageOf(refusal())).not.toContain(code);
+    }
+    expect(messageOf(new Error(LOCKED_ELSEWHERE))).toBe(LOCKED_ELSEWHERE);
+    // A code without a status isn't Flow ID's, so it keeps its own message.
+    expect(
+      messageOf(Object.assign(new Error("no such file"), { code: "ENOENT" })),
+    ).toBe("no such file");
+    expect(messageOf("plain")).toBe("plain");
+  });
+
+  test("the status bar reads a failed connection or a busy Flow ID as a wait, and passes every other status through", () => {
+    expect(statusWords(SYNC_CONNECTION_FAILED)).toBe(
+      "Connection to Flow ID failed; changes are kept and sync resumes once it's back",
+    );
+    expect(statusWords(SYNC_BUSY)).toBe("Syncing again in a moment");
+    for (const status of [
+      SYNCED,
+      SYNC_PENDING,
+      `${SYNC_RATE_LIMITED} · Next sync 12:00`,
+    ])
+      expect(statusWords(status)).toBe(status);
   });
 
   test("a close while the vault still opens keeps the lock until that open settles and stops", async () => {

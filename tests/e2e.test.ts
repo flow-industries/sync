@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { SYNC_CONNECTION_FAILED } from "@flow-industries/seal";
 import * as kit from "@flow-industries/seal/internal/testing/kit";
 import {
   type AdminBrowser,
@@ -12,9 +13,10 @@ import {
   TEST_DID,
   TEST_HOST,
 } from "@flow-industries/seal/testing";
-import { REMOVED, SyncController } from "../src/controller";
+import { KEPT, REMOVED, SyncController } from "../src/controller";
 import { Custody, type SecretBackend } from "../src/custody";
 import {
+  CONNECTION_FAILED,
   createDeviceSeed,
   type DeviceCheckpoint,
   deleteDeviceStorage,
@@ -58,6 +60,8 @@ function obsidian(note: FakeFlowId, name: string) {
   const notices: string[] = [];
   /** Every mass deletion a round asked to confirm; each is approved, so a planned deletion would run. */
   const asked: Deletions[] = [];
+  /** While down, no request reaches Flow ID: what a dropped network looks like to the device. */
+  const network = { down: false };
   const controller: SyncController = new SyncController({
     custody,
     device: {
@@ -69,7 +73,10 @@ function obsidian(note: FakeFlowId, name: string) {
       stale: isStaleWrite,
     },
     host: TEST_HOST,
-    fetch: (url, init) => note.fetch(url, init),
+    fetch: (url, init) =>
+      network.down
+        ? Promise.reject(new TypeError("Failed to fetch"))
+        : note.fetch(url, init),
     local,
     configDir: ".obsidian",
     updatesLinks: () => links.updated,
@@ -112,6 +119,7 @@ function obsidian(note: FakeFlowId, name: string) {
     losses,
     notices,
     asked,
+    network,
     turn,
   };
 }
@@ -283,6 +291,52 @@ describe("two Obsidian vaults synced through NOTE", () => {
     await web.sync();
     expect((await web.read()).notes.map((item) => item.path)).toEqual([
       "Kept.md",
+    ]);
+    web.lock();
+    expect(note.violations).toEqual([]);
+  }, 60_000);
+
+  test("a failed connection to Flow ID reads as a wait, never a code, and syncs once it's back", async () => {
+    const note = fakeFlowId();
+    const admin = await adminBrowser(note);
+    const a = obsidian(note, "dddddd");
+    opened.push(a);
+    a.local.put("Before.md", "synced first");
+    await link(admin, a);
+    await a.controller.confirm();
+    await a.controller.syncNow();
+
+    // Open: the device's own sync can't reach Flow ID, keeps the edit and says it will retry.
+    a.network.down = true;
+    a.local.put("Open.md", "written while open");
+    await a.controller.syncNow();
+    expect(a.controller.phase).toEqual({
+      kind: "open",
+      status: SYNC_CONNECTION_FAILED,
+    });
+    a.controller.close();
+
+    // Closed: an open that can't reach Flow ID stops in words.
+    a.local.put("Closed.md", "written while closed");
+    await a.controller.start();
+    expect(a.controller.phase).toEqual({
+      kind: "stopped",
+      message: `${CONNECTION_FAILED} ${KEPT}`,
+    });
+    expect(a.notices).toEqual([
+      `Syncing stopped. ${CONNECTION_FAILED} ${KEPT}`,
+    ]);
+
+    a.network.down = false;
+    await a.controller.syncNow();
+    expect(a.controller.phase.kind).toBe("open");
+    await a.controller.syncNow();
+    const web = await openAdminVault(admin);
+    await web.sync();
+    expect((await web.read()).notes.map((item) => item.path).sort()).toEqual([
+      "Before.md",
+      "Closed.md",
+      "Open.md",
     ]);
     web.lock();
     expect(note.violations).toEqual([]);
